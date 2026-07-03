@@ -1,6 +1,20 @@
-# Part 2: SageMaker Configuration
-# Copy this file to terraform.tfvars and update with your values
+# Mục đích file:
+# Đây là file mẫu để người dùng copy thành terraform.tfvars.
+# Nó cho biết những giá trị nào thường cần chỉnh trước khi chạy terraform apply.
 
-# Your AWS region for SageMaker
-# Should match your DEFAULT_AWS_REGION from .env
+# Phần 2: Cấu hình SageMaker
+# Hãy copy file này thành terraform.tfvars rồi sửa bằng giá trị thực tế của bạn.
+
+# Chức năng:
+# Giá trị này chọn region deploy cho toàn bộ resource của folder này.
+# Nếu bạn dùng region khác với ví dụ trong guide, hãy đổi tại đây.
+# AWS region dùng để deploy SageMaker.
+# Nên khớp với DEFAULT_AWS_REGION trong file .env.
 aws_region = "us-east-1"
+
+# Nếu bạn deploy ở region khác us-east-1, rất nên thêm sagemaker_image_uri đúng region.
+# Nếu không, bạn có thể gặp lỗi:
+# "Cross region ECR image pulls are not allowed"
+#
+# Ví dụ cho ap-southeast-1:
+# sagemaker_image_uri = "763104351884.dkr.ecr.ap-southeast-1.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"

@@ -1,3 +1,7 @@
+# File test này minh họa cách semantic search hoạt động sau khi dữ liệu đã được ingest.
+# Nó không qua API Gateway mà gọi thẳng SageMaker và S3 Vectors,
+# nhờ đó rất tiện để xác nhận bản thân vector database đã có dữ liệu
+# và cơ chế truy vấn ngữ nghĩa đang trả về kết quả hợp lý.
 """
 Test script for searching S3 Vectors.
 This demonstrates how to search the indexed documents.
@@ -9,10 +13,12 @@ import boto3
 from dotenv import load_dotenv
 from pathlib import Path
 
+# Nạp cấu hình từ .env ở root để dùng đúng bucket/endpoint mà các guide trước đã thiết lập.
 # Load environment variables from project root
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(env_path, override=True)
 
+# Script cần cùng bộ cấu hình với ingest để bảo đảm truy vấn đúng index đã lưu.
 # Get configuration
 VECTOR_BUCKET = os.getenv('VECTOR_BUCKET')
 SAGEMAKER_ENDPOINT = os.getenv('SAGEMAKER_ENDPOINT', 'alex-embedding-endpoint')
@@ -22,10 +28,13 @@ if not VECTOR_BUCKET:
     print("Error: Please run Guide 3 Step 4 to save VECTOR_BUCKET to .env")
     exit(1)
 
+# Hai client AWS này đủ để thực hiện toàn bộ flow query ở local.
 # Initialize AWS clients
 s3_vectors = boto3.client('s3vectors')
 sagemaker_runtime = boto3.client('sagemaker-runtime')
 
+# Hàm chuyển query text thành embedding trước khi đem đi semantic search.
+# Đây là bước bắt buộc trong hầu hết hệ RAG/vector search.
 def get_embedding(text):
     """Get embedding vector from SageMaker endpoint."""
     response = sagemaker_runtime.invoke_endpoint(
@@ -43,6 +52,9 @@ def get_embedding(text):
             return result[0]  # Extract from [[embedding]]
     return result  # Return as-is if not nested
 
+# S3 Vectors không cung cấp list operation đơn giản như database truyền thống,
+# nên hàm này dùng một truy vấn "rộng" với từ common để quan sát các vector hiện có.
+# Đây là mẹo debug tốt cho giai đoạn học tập và kiểm thử thủ công.
 def list_all_vectors():
     """List all vectors in the index."""
     print(f"Listing vectors in bucket: {VECTOR_BUCKET}, index: {INDEX_NAME}")
@@ -82,6 +94,9 @@ def list_all_vectors():
     except Exception as e:
         print(f"Error listing vectors: {e}")
 
+# Hàm này thể hiện flow search chuẩn:
+# vector hóa câu hỏi người dùng, query topK kết quả gần nhất,
+# rồi in ra similarity score dễ đọc bằng công thức 1 - distance.
 def search_vectors(query_text, k=5):
     """Search for vectors by query text."""
     print(f"\nSearching for: '{query_text}'")
@@ -117,6 +132,9 @@ def search_vectors(query_text, k=5):
     except Exception as e:
         print(f"Error searching: {e}")
 
+# Entry point của script explorer.
+# Hàm này vừa liệt kê dữ liệu đang có, vừa chạy một loạt truy vấn mẫu
+# để giúp người học thấy semantic search tìm theo ý nghĩa chứ không chỉ theo từ khóa khớp chính xác.
 def main():
     """Explore the S3 Vectors database."""
     print("=" * 60)

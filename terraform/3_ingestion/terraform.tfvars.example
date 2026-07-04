@@ -1,10 +1,23 @@
 # Part 3: Ingestion Pipeline Configuration
+# Dòng này cho biết file đang chứa cấu hình mẫu cho Part 3.
 # Copy this file to terraform.tfvars and update with your values
+# Nhắc người học phải copy file mẫu này thành file terraform.tfvars thật trước khi apply.
+# Đây là file mẫu để bạn tạo file terraform.tfvars thật cho môi trường của riêng mình.
+# Nó không nên chứa secret thật khi commit lên git.
 
 # Your AWS region for the ingestion infrastructure
+# Dòng mô tả này nhắc rằng biến dưới đây quyết định region của toàn bộ resource Part 3.
 # Should match your DEFAULT_AWS_REGION from .env
+# Nhắc người học đồng bộ giá trị với .env để tránh lệch cấu hình.
+# Region này nên thống nhất với các phần trước để ARN và endpoint không bị lệch.
 aws_region = "us-east-1"
+# Gán giá trị mẫu cho region, người học có thể thay thành region thật mình đang dùng.
 
 # SageMaker endpoint name from Part 2
+# Dòng mô tả này nhắc rằng biến dưới đây đến từ output của Part 2.
 # This should be "alex-embedding-endpoint" if you didn't change it
+# Nếu người học không đổi tên endpoint ở Part 2 thì giữ nguyên giá trị mẫu này.
+# Giá trị này phải khớp với output từ terraform/2_sagemaker;
+# nếu sai, Lambda ingest sẽ không gọi được model embedding.
 sagemaker_endpoint_name = "alex-embedding-endpoint"
+# Gán tên endpoint embedding mẫu để Lambda Part 3 có thể invoke đúng mô hình.

@@ -1,3 +1,7 @@
+# File tiện ích này dùng để dọn sạch dữ liệu test trong S3 Vectors.
+# Nó đặc biệt hữu ích khi bạn muốn lặp lại bài thực hành từ đầu
+# hoặc cần đưa knowledge base về trạng thái rỗng để xác minh lại từng bước.
+# Script này xóa trực tiếp bằng SDK, không đi qua API Gateway.
 """
 Clean up S3 Vectors database by removing all test data.
 This script directly accesses S3 Vectors without going through API Gateway.
@@ -9,10 +13,12 @@ import boto3
 from dotenv import load_dotenv
 from pathlib import Path
 
+# Nạp .env từ root để dùng chung cấu hình bucket và endpoint với các script khác.
 # Load environment variables from project root
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(env_path, override=True)
 
+# Script xóa chỉ cần biết bucket nào và index nào cần dọn.
 # Get configuration
 VECTOR_BUCKET = os.getenv('VECTOR_BUCKET')
 INDEX_NAME = 'financial-research'
@@ -21,9 +27,16 @@ if not VECTOR_BUCKET:
     print("Error: VECTOR_BUCKET not found in .env")
     exit(1)
 
+# Client S3 Vectors dùng cho thao tác query và delete.
 # Initialize S3 Vectors client
 s3_vectors = boto3.client('s3vectors')
 
+# Hàm này thực hiện việc xóa toàn bộ vector đang có trong index.
+# Vì S3 Vectors không có list-all chuẩn, script phải:
+# 1. tạo một embedding "dummy",
+# 2. query theo lô,
+# 3. xóa từng key trả về,
+# 4. lặp cho đến khi không còn kết quả.
 def delete_all_vectors():
     """Delete all vectors from the index."""
     print("Cleaning S3 Vectors database...")
@@ -97,6 +110,8 @@ def delete_all_vectors():
         if deleted_count > 0:
             print(f"   (Partially successful - deleted {deleted_count} vectors)")
 
+# Entry point của script cleanup.
+# Trước khi xóa thật, hàm yêu cầu người dùng xác nhận để tránh mất dữ liệu test ngoài ý muốn.
 def main():
     """Clean up the S3 Vectors database."""
     print("=" * 60)

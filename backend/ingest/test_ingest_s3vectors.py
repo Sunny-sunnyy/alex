@@ -1,3 +1,7 @@
+# File test này dùng để kiểm tra trực tiếp luồng ingest mà không đi qua API Gateway.
+# Đây là cách test đơn giản và rất hữu ích để tách lỗi:
+# nếu script này chạy được thì SageMaker endpoint, quyền IAM local,
+# và thao tác ghi vào S3 Vectors cơ bản là đang hoạt động đúng.
 """
 Test script for ingesting documents directly to S3 Vectors.
 This bypasses API Gateway and tests the S3 Vectors service directly.
@@ -11,10 +15,16 @@ import datetime
 from dotenv import load_dotenv
 from pathlib import Path
 
+# Script đọc .env ở root repo để dùng lại cấu hình mà guide yêu cầu lưu sau mỗi part.
+# Cách này giúp test local nhất quán với môi trường deploy.
 # Load environment variables from project root
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(env_path, override=True)
 
+# Khối cấu hình tối thiểu để test ingest:
+# - VECTOR_BUCKET: nơi lưu vector,
+# - SAGEMAKER_ENDPOINT: model embedding đã deploy ở Part 2,
+# - INDEX_NAME: index semantic search được tạo ở Part 3.
 # Get configuration
 VECTOR_BUCKET = os.getenv('VECTOR_BUCKET')
 SAGEMAKER_ENDPOINT = os.getenv('SAGEMAKER_ENDPOINT', 'alex-embedding-endpoint')
@@ -24,10 +34,13 @@ if not VECTOR_BUCKET:
     print("Error: Please run Guide 3 Step 4 to save VECTOR_BUCKET to .env")
     exit(1)
 
+# Khởi tạo các client AWS cần cho test end-to-end ở local.
 # Initialize AWS clients
 s3_vectors = boto3.client('s3vectors')
 sagemaker_runtime = boto3.client('sagemaker-runtime')
 
+# Hàm này tái hiện đúng bước vector hóa của Lambda ingest thật.
+# Mục tiêu là bảo đảm kết quả test local và logic production dùng cùng một cách gọi model.
 def get_embedding(text):
     """Get embedding vector from SageMaker endpoint."""
     response = sagemaker_runtime.invoke_endpoint(
@@ -45,6 +58,9 @@ def get_embedding(text):
             return result[0]  # Extract from [[embedding]]
     return result  # Return as-is if not nested
 
+# Hàm này mô phỏng đúng thao tác cốt lõi của hệ ingest:
+# nhận text, sinh embedding, tạo UUID làm key, rồi put_vectors vào index.
+# Nhờ tách riêng thành hàm, main() có thể gọi lặp lại cho nhiều tài liệu mẫu.
 def ingest_document(text, metadata=None):
     """Ingest a document directly to S3 Vectors."""
     # Get embedding from SageMaker
@@ -72,6 +88,10 @@ def ingest_document(text, metadata=None):
     
     return vector_id
 
+# Đây là entry point của script test local.
+# Hàm in ra cấu hình hiện tại, chuẩn bị 3 tài liệu mẫu,
+# rồi nạp từng tài liệu để người học dễ quan sát kết quả từng bước.
+# Bộ dữ liệu mẫu được chọn để phù hợp với các truy vấn semantic search ở bài sau.
 def main():
     """Test direct ingestion to S3 Vectors."""
     

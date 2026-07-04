@@ -446,6 +446,472 @@ Khi bắt đầu Day 4, nên xác minh lại:
 
 ---
 
+# Day 4 - Ingestion Pipeline With S3 Vectors
+
+## Phạm vi Day 4
+
+Day 4 trong repo này bao gồm:
+
+- `tai_lieu/week3/day4_summary.md`
+- `guides/3_ingest.md`
+- `backend/ingest`
+- `terraform/3_ingestion`
+
+Đây là ngày xây dựng đường ống nạp dữ liệu vector đầu tiên cho Alex.
+
+Mục tiêu kỹ thuật của Day 4:
+
+1. tạo lớp ingest để biến `text -> embedding -> stored vector`;
+2. đóng gói code Python thành `lambda_function.zip` để deploy Lambda;
+3. triển khai API Gateway + Lambda + IAM cho endpoint `/ingest`;
+4. lưu lại các giá trị output vào `.env`;
+5. kiểm tra semantic ingest/search end-to-end bằng các script local.
+
+## Những file đã được dùng để lấy ngữ cảnh
+
+Các file nền tảng cần đọc trước hoặc song song trong Day 4:
+
+- `README.md`
+- `gameplan.md`
+- `guides/architecture.md`
+- `guides/agent_architecture.md`
+- `guides/1_permissions.md`
+- `guides/2_sagemaker.md`
+- `guides/3_ingest.md`
+- `tai_lieu/week3/day4_summary.md`
+- `backend/ingest/README.md`
+- `backend/ingest/ingest_s3vectors.py`
+- `backend/ingest/search_s3vectors.py`
+- `backend/ingest/test_ingest_s3vectors.py`
+- `backend/ingest/test_search_s3vectors.py`
+- `backend/ingest/cleanup_s3vectors.py`
+- `backend/ingest/package.py`
+- `backend/ingest/pyproject.toml`
+- `terraform/3_ingestion/README.md`
+- `terraform/3_ingestion/main.tf`
+- `terraform/3_ingestion/variables.tf`
+- `terraform/3_ingestion/outputs.tf`
+- `terraform/3_ingestion/terraform.tfvars.example`
+
+Vai trò của từng nhóm file:
+
+- `guides/3_ingest.md`: hướng dẫn học viên tạo bucket/index vector, package Lambda, deploy Terraform, và test ingest/search.
+- `tai_lieu/week3/day4_summary.md`: tóm tắt lý thuyết Day 4, luồng RAG ingest, semantic search, và phần test end-to-end.
+- `backend/ingest/*`: phần application code cho ingest, search, cleanup, packaging, và local verification.
+- `terraform/3_ingestion/*`: phần hạ tầng AWS để đưa code ingest lên Lambda và public hóa qua API Gateway.
+
+## Day 4 - Phần 1: Kiến trúc ingest pipeline
+
+### Mục tiêu
+
+Thiết lập mắt xích trung gian để mọi nghiên cứu hoặc tài liệu tài chính có thể được nạp vào knowledge base vector của Alex.
+
+### Luồng lớn cần nắm
+
+1. client hoặc service khác gửi `text`;
+2. Lambda ingest gọi SageMaker endpoint từ Day 3;
+3. SageMaker trả embedding 384 chiều;
+4. vector cùng metadata được ghi vào index `financial-research`;
+5. về sau researcher hoặc các agent khác sẽ truy xuất lại bằng semantic search.
+
+### Điểm phải nhớ
+
+Part 3 là chỗ nối giữa:
+
+- **Part 2**: dịch vụ embedding;
+- **storage layer**: vector bucket / index;
+- **future agents**: nơi sẽ khai thác knowledge base về sau.
+
+## Day 4 - Phần 2: `backend/ingest`
+
+### Mục tiêu
+
+Có một codebase Python nhỏ, độc lập, có thể:
+
+1. nhận văn bản đầu vào;
+2. gọi SageMaker để lấy embedding;
+3. ghi trực tiếp vào S3 Vectors;
+4. hỗ trợ search local;
+5. package thành artifact deploy cho Lambda.
+
+### Những file chính trong `backend/ingest`
+
+- `ingest_s3vectors.py`
+  - Lambda handler chính.
+  - Parse `event.body`, lấy `text`, gọi `get_embedding(text)`, rồi `put_vectors`.
+- `search_s3vectors.py`
+  - Search handler theo kiểu Lambda-style.
+  - Vector hóa query text rồi gọi `query_vectors`.
+- `test_ingest_s3vectors.py`
+  - Test local trực tiếp bằng SDK.
+  - Nạp 3 tài liệu mẫu: Tesla, Amazon, NVIDIA.
+- `test_search_s3vectors.py`
+  - Liệt kê dữ liệu hiện có và chạy semantic search mẫu.
+- `cleanup_s3vectors.py`
+  - Xóa dữ liệu test khỏi index để reset bài thực hành.
+- `package.py`
+  - Lấy dependencies từ `.venv`, copy source cần thiết, và build `lambda_function.zip`.
+- `pyproject.toml`
+  - Khai báo uv project độc lập cho thư mục này.
+
+### Logic chính của `ingest_s3vectors.py`
+
+Luồng xử lý:
+
+1. đọc `VECTOR_BUCKET`, `SAGEMAKER_ENDPOINT`, `INDEX_NAME`;
+2. gọi `sagemaker-runtime invoke_endpoint` với payload `{"inputs": text}`;
+3. bóc response lồng kiểu `[[[embedding]]]` về mảng 1 chiều;
+4. sinh `uuid4` làm `document_id`;
+5. gọi `s3vectors.put_vectors(...)`;
+6. trả JSON response thành công hoặc lỗi.
+
+### Điểm kỹ thuật quan trọng
+
+- embedding model của Day 3 trả vector **384 chiều**;
+- index Day 4 phải cấu hình đúng `dimension = 384`;
+- code đang xử lý đặc biệt response nested array từ Hugging Face container;
+- local test và production Lambda dùng cùng logic embedding cốt lõi.
+
+### Dependencies đáng chú ý
+
+`backend/ingest/pyproject.toml` hiện có:
+
+- `boto3`
+- `python-dotenv`
+- `requests`
+- `requests-aws4auth`
+- `opensearch-py`
+- `tenacity`
+
+Trong đó:
+
+- `boto3` và `python-dotenv` là phần dùng trực tiếp cho flow hiện tại;
+- `opensearch-py` và `requests-aws4auth` có dấu hiệu là dư âm từ implementation vector storage cũ hơn.
+
+## Day 4 - Phần 3: Packaging Lambda
+
+### Mục tiêu
+
+Tạo artifact `lambda_function.zip` để Terraform có thể deploy code ingest lên AWS Lambda.
+
+### Cách `package.py` hoạt động
+
+1. tìm `site-packages` trong `.venv`;
+2. copy dependencies vào `build/package`;
+3. copy `ingest_s3vectors.py` và `search_s3vectors.py`;
+4. zip toàn bộ thành `lambda_function.zip`;
+5. xóa thư mục build tạm.
+
+### Ý nghĩa thực tế
+
+Terraform ở `terraform/3_ingestion` **không tự build code**.
+
+Nó chỉ deploy file zip đã tồn tại tại:
+
+```text
+../../backend/ingest/lambda_function.zip
+```
+
+Nên quy trình đúng là:
+
+1. vào `backend/ingest`;
+2. chạy `uv run package.py`;
+3. xác nhận zip đã được tạo;
+4. mới sang `terraform/3_ingestion` để `terraform apply`.
+
+## Day 4 - Phần 4: `terraform/3_ingestion`
+
+### Mục tiêu
+
+Deploy hạ tầng cho ingest pipeline:
+
+1. IAM role/policy cho Lambda;
+2. Lambda `alex-ingest`;
+3. CloudWatch Log Group;
+4. API Gateway REST API;
+5. endpoint `POST /ingest`;
+6. API key + usage plan để bảo vệ endpoint public.
+
+### Các file quan trọng
+
+#### `main.tf`
+
+Định nghĩa:
+
+- provider AWS;
+- data source `aws_caller_identity`;
+- bucket `alex-vectors-${account_id}`;
+- IAM role/policy cho Lambda;
+- `aws_lambda_function.ingest`;
+- log group `/aws/lambda/alex-ingest`;
+- REST API `alex-api`;
+- resource `/ingest`;
+- method `POST`;
+- Lambda proxy integration;
+- Lambda permission cho API Gateway;
+- deployment + stage `prod`;
+- API key;
+- usage plan;
+- usage plan key binding.
+
+#### `variables.tf`
+
+Khai báo:
+
+- `aws_region`
+- `sagemaker_endpoint_name`
+
+#### `outputs.tf`
+
+Xuất ra:
+
+- `vector_bucket_name`
+- `api_endpoint`
+- `api_key_id`
+- `api_key_value`
+- `setup_instructions`
+
+#### `terraform.tfvars.example`
+
+Cho biết hai giá trị quan trọng phải điền:
+
+- `aws_region`
+- `sagemaker_endpoint_name`
+
+### Cấu hình hạ tầng chính
+
+Lambda `alex-ingest` hiện được cấu hình:
+
+- runtime: `python3.12`
+- timeout: `60`
+- memory: `512`
+- handler: `ingest_s3vectors.lambda_handler`
+
+Biến môi trường được inject vào Lambda:
+
+```text
+VECTOR_BUCKET
+SAGEMAKER_ENDPOINT
+```
+
+API Gateway hiện dùng:
+
+- REST API
+- stage `prod`
+- route `POST /ingest`
+- `api_key_required = true`
+- integration kiểu `AWS_PROXY`
+
+Usage plan hiện đặt:
+
+- quota: `10000 requests / month`
+- rate limit: `100 req/s`
+- burst limit: `200`
+
+## Day 4 - Phần 5: S3 Vectors và điểm lệch cần nhớ
+
+### Điều guide mô tả
+
+Guide Day 4 mô tả:
+
+- học viên tạo **Vector Bucket** thủ công trên S3 Console;
+- tạo index `financial-research`;
+- dùng bucket đó như một stateful resource tách khỏi Terraform destroy.
+
+### Điều implementation hiện tại của repo đang làm
+
+`terraform/3_ingestion/main.tf` hiện:
+
+- tạo `aws_s3_bucket.vectors` bằng Terraform;
+- đồng thời IAM policy lại cấp quyền theo namespace `s3vectors:*`.
+
+Điều này cho thấy repo đang có một điểm lệch cần nhớ:
+
+- **guide/course narrative** nhấn mạnh S3 Vectors bucket/index tạo thủ công;
+- **implementation Terraform hiện tại** lại có thêm phần regular S3 bucket tên `alex-vectors-<account_id>`.
+
+### Ý nghĩa khi debug về sau
+
+Nếu ingest/search lỗi trong những ngày sau, cần xác minh rõ:
+
+1. đang lỗi ở regular S3 hay ở S3 Vectors namespace;
+2. bucket/index thực tế đã được tạo ở Console chưa;
+3. ARN và permissions `s3vectors:*` có đang khớp với resource thật không;
+4. code local test đang đọc đúng `VECTOR_BUCKET` nào trong `.env`.
+
+## Day 4 - Phần 6: Test end-to-end
+
+### Mục tiêu
+
+Xác minh chuỗi:
+
+1. search khi database trống;
+2. ingest 3 tài liệu mẫu;
+3. search lại bằng semantic queries;
+4. nếu cần thì cleanup để làm lại từ đầu.
+
+### Bộ dữ liệu mẫu đang dùng
+
+`test_ingest_s3vectors.py` ingest 3 tài liệu về:
+
+- Tesla
+- Amazon
+- NVIDIA
+
+### Semantic queries mẫu đang dùng
+
+`test_search_s3vectors.py` dùng các truy vấn:
+
+- `"electric vehicles and sustainable transportation"`
+- `"cloud computing and AWS services"`
+- `"artificial intelligence and GPU computing"`
+
+Điểm hiển thị ra màn hình được tính theo:
+
+```python
+score = 1 - distance
+```
+
+### Ý nghĩa học thuật
+
+Đây là bước xác minh semantic search thật sự hoạt động theo ngữ nghĩa, không chỉ theo keyword exact match.
+
+## Giá trị output quan trọng cần lưu cho ngày sau
+
+Sau Day 4, các giá trị tối thiểu cần có hoặc cần xác minh trong `.env` là:
+
+```env
+SAGEMAKER_ENDPOINT=alex-embedding-endpoint
+VECTOR_BUCKET=alex-vectors-...
+ALEX_API_ENDPOINT=https://.../prod/ingest
+ALEX_API_KEY=...
+```
+
+Ngoài ra cần nhớ:
+
+- region thực tế đang deploy;
+- endpoint SageMaker dùng region nào;
+- `terraform/3_ingestion` có local state riêng;
+- `backend/ingest/lambda_function.zip` là artifact build quan trọng.
+
+## Lỗi và bẫy quan trọng của Day 4
+
+### Lỗi 1: thiếu `lambda_function.zip`
+
+- triệu chứng:
+  - `terraform apply` lỗi khi tạo Lambda hoặc deploy code không đúng.
+- root cause:
+  - chưa chạy `uv run package.py` trước khi deploy.
+- cách fix:
+  - build zip trước rồi chạy lại Terraform.
+
+### Lỗi 2: API Gateway gọi lỗi `403` hoặc `500`
+
+- triệu chứng:
+  - gọi endpoint `/ingest` bị `Forbidden` hoặc `Internal Server Error`.
+- root cause:
+  - thiếu API key, API key chưa gắn usage plan, hoặc permission invoke Lambda chưa đúng.
+- cách fix:
+  - kiểm tra `aws_lambda_permission.api_gateway`, `aws_api_gateway_usage_plan_key`, và key value thật lấy từ CLI.
+
+### Lỗi 3: ingest lỗi do embedding trả nested arrays
+
+- triệu chứng:
+  - put vector thất bại hoặc format vector không hợp lệ.
+- root cause:
+  - response từ Hugging Face container có dạng `[[[embedding]]]`.
+- cách fix:
+  - bóc response về mảng 1 chiều trước khi ghi vào vector store.
+
+### Lỗi 4: nhầm giữa regular S3 bucket và S3 Vectors bucket/index
+
+- triệu chứng:
+  - cấu hình tưởng đúng nhưng local test hoặc Lambda vẫn không ghi/query được như kỳ vọng.
+- root cause:
+  - guide và implementation hiện tại không hoàn toàn đồng nhất về cách thể hiện lớp lưu trữ vector.
+- cách fix:
+  - xác minh lại resource thật trên AWS Console, `.env`, IAM policy, và tên bucket/index đang được code sử dụng.
+
+## Các lệnh cốt lõi của Day 4
+
+### Build package Lambda
+
+```bash
+cd backend/ingest
+uv run package.py
+```
+
+### Deploy hạ tầng ingest
+
+```bash
+cd ../../terraform/3_ingestion
+terraform init
+terraform apply
+```
+
+### Xem output Terraform
+
+```bash
+terraform output
+```
+
+### Lấy API key thật
+
+```bash
+aws apigateway get-api-key --api-key YOUR_API_KEY_ID --include-value --query 'value' --output text
+```
+
+### Test ingest local trực tiếp
+
+```bash
+cd ../../backend/ingest
+uv run test_ingest_s3vectors.py
+```
+
+### Test semantic search
+
+```bash
+uv run test_search_s3vectors.py
+```
+
+### Cleanup dữ liệu test
+
+```bash
+uv run cleanup_s3vectors.py
+```
+
+## Trạng thái kết thúc Day 4
+
+Nếu Day 4 hoàn thành đúng, trạng thái mong muốn là:
+
+1. đã hiểu rõ ingest pipeline nối giữa SageMaker và vector storage;
+2. đã có `backend/ingest` như một uv project độc lập;
+3. đã build được `lambda_function.zip`;
+4. đã có hạ tầng `terraform/3_ingestion` với Lambda + API Gateway + API key;
+5. đã lưu các output cần thiết vào `.env`;
+6. đã hiểu cách test direct ingest, semantic search, và cleanup;
+7. đã nhận diện được điểm lệch cần theo dõi giữa guide và implementation hiện tại của repo.
+
+## Handoff sang Day 5
+
+Trước khi bắt đầu Day 5, nên xác minh lại:
+
+1. `SAGEMAKER_ENDPOINT`, `VECTOR_BUCKET`, `ALEX_API_ENDPOINT`, `ALEX_API_KEY` đã có trong `.env` chưa;
+2. `terraform/3_ingestion` đã có state ổn định chưa;
+3. local test ingest/search có chạy đúng chưa;
+4. bucket/index vector thật trên AWS đang ở trạng thái nào;
+5. region của SageMaker, API Gateway, và các script local có nhất quán chưa.
+
+Khi sang Day 5, các thông tin từ Day 4 sẽ còn được dùng tiếp:
+
+- knowledge base vector đã ingest được hay chưa;
+- endpoint ingest public đang dùng URL nào;
+- API key hiện tại là gì;
+- region đang vận hành thực tế;
+- thói quen debug theo từng lớp: local SDK -> Lambda -> API Gateway.
+
+---
+
 # Template Append Cho Ngày Sau
 
 Mỗi ngày mới nên append theo form này:
@@ -501,3 +967,13 @@ Mỗi ngày mới nên append theo form này:
   - `terraform/2_sagemaker`
 - Đã ghi lại lỗi region ECR và cách fix.
 - Đã chuẩn hóa hướng dùng README như một file tích lũy cho toàn bộ các ngày sau.
+
+## Day 4
+
+- Đã append nhật ký cho:
+  - `tai_lieu/week3/day4_summary.md`
+  - `guides/3_ingest.md`
+  - `backend/ingest`
+  - `terraform/3_ingestion`
+- Đã ghi lại đầy đủ flow ingest, packaging, Terraform deploy, local test, và semantic search.
+- Đã ghi chú điểm lệch cần theo dõi giữa guide Day 4 và implementation hiện tại của repo ở lớp vector storage.

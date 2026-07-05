@@ -850,3 +850,130 @@ What is still true:
 - fallback-heavy behavior remains
 - request-end ingest certainty still needs another follow-up
 - there is still room to tighten fallback classification and define what counts as true `success_verified`
+
+## Post-Task-5 Follow-Up: request_end ingest_success propagation
+
+After pushing Task 5, I implemented one small observability follow-up to close the remaining ingest-status gap.
+
+### Problem
+
+Even after the earlier ingest telemetry work, some runs still showed:
+
+- `research_ingest success=True`
+- but `request_end ingest_success=None`
+
+That meant the tool-level evidence existed, but the request-final summary was not always reading it back reliably.
+
+### Root cause
+
+The earlier implementation stored the last ingest result in a `ContextVar`.
+
+That was not reliable enough for the request-final summary path, likely because:
+
+- the tool execution context and the final request context were not always sharing the same mutable observation state
+
+Evidence for this diagnosis:
+
+- `run_id` propagation into the tool still worked
+- but the tool result itself sometimes did not reappear in the request-final lookup
+
+### Fix applied
+
+Changed `backend/researcher/tools.py` so ingest observations are stored in:
+
+- a small process-wide map keyed by `run_id`
+
+and protected with a lock.
+
+Then `backend/researcher/server.py` was updated so:
+
+- `_resolve_ingest_success()` reads the observation by explicit `run_id`
+- `request_end` clears that observation after logging the final summary
+
+### Verification
+
+Representative deployed verification run:
+
+- `uv run test_research.py "Microsoft cloud revenue growth"`
+
+CloudWatch evidence for run:
+
+- `run_id=ae77f7cf-0d61-422a-8dc1-9cb9b9c723aa`
+- `research_ingest ... success=True ... document_id=8fee18af-4a31-401f-bf2e-805f970103f1`
+- `request_end ... outcome=success_fallback ingest_success=True degraded_reason=web_research_failed ...`
+
+### Conclusion
+
+This follow-up did not change browser behavior.
+
+It did improve observability by making:
+
+- `request_end ingest_success`
+
+match real tool evidence more reliably when the ingest tool actually runs.
+
+## Newly confirmed problem after the observability follow-up
+
+The latest live verification for:
+
+- `Microsoft cloud revenue growth`
+
+confirmed an important remaining issue for the next session.
+
+### What happened
+
+The run returned:
+
+- HTTP `200 OK`
+- `Outcome: success_fallback`
+- `ingest_success=True`
+
+CloudWatch also showed:
+
+- `browser_run status=ok`
+- Playwright successfully launched Chromium
+- browser navigation attempted direct article URLs
+
+But the browser still did **not** extract usable article content from the web.
+
+### Direct evidence
+
+In the same run, Playwright navigated to:
+
+- `https://www.investopedia.com/terms/m/microsoftcloud.asp`
+- then quickly to `about:blank`
+- then later to a CNN URL
+- then into non-article/third-party paths such as:
+  - `about:srcdoc`
+  - `about:blank`
+  - `https://a125375509.cdn.optimizely.com/client_storage/a125375509.html`
+
+The final response was still a fallback note, and the degraded reason was:
+
+- `page_not_found`
+
+### Updated interpretation
+
+This means the remaining browser issue is not just:
+
+- browser startup
+- `MaxTurnsExceeded`
+- ingest propagation
+
+It is now clearly also:
+
+- browser navigation reaches pages,
+- but the runtime still fails to obtain **clean, usable direct article content**
+- because pages redirect, blank out, or land in non-article/client-storage/interstitial flows
+
+### Next-session focus
+
+The next debugging session should explicitly target:
+
+1. why allowed article URLs degrade into:
+   - `about:blank`
+   - `about:srcdoc`
+   - CDN/client-storage pages
+2. how to detect and cut off those paths earlier
+3. whether direct URL selection needs to be stricter or source-specific
+4. whether `browser_snapshot` should be attempted only after verifying the page is still on a real article URL

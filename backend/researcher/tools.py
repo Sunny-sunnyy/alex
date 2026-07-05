@@ -6,6 +6,7 @@ Tools for the Alex Researcher agent
 import logging
 import os
 from contextvars import ContextVar
+from threading import Lock
 from typing import Dict, Any
 from datetime import datetime, UTC
 import httpx
@@ -20,10 +21,8 @@ logger = logging.getLogger(__name__)
 ALEX_API_ENDPOINT = os.getenv("ALEX_API_ENDPOINT")
 ALEX_API_KEY = os.getenv("ALEX_API_KEY")
 _INGEST_RUN_ID: ContextVar[str | None] = ContextVar("researcher_ingest_run_id", default=None)
-_LAST_INGEST_RESULT: ContextVar[Dict[str, Any] | None] = ContextVar(
-    "researcher_last_ingest_result",
-    default=None,
-)
+_INGEST_OBSERVATIONS: dict[str, Dict[str, Any]] = {}
+_INGEST_OBSERVATIONS_LOCK = Lock()
 
 
 def set_ingest_run_id(run_id: str | None) -> None:
@@ -33,12 +32,36 @@ def set_ingest_run_id(run_id: str | None) -> None:
 
 def reset_ingest_observation() -> None:
     """Clear the last observed ingest result for a new researcher request."""
-    _LAST_INGEST_RESULT.set(None)
+    run_id = _INGEST_RUN_ID.get()
+    if not run_id:
+        return
+    with _INGEST_OBSERVATIONS_LOCK:
+        _INGEST_OBSERVATIONS.pop(run_id, None)
 
 
-def get_last_ingest_observation() -> Dict[str, Any] | None:
-    """Return the last ingest result captured during the current request."""
-    return _LAST_INGEST_RESULT.get()
+def get_last_ingest_observation(run_id: str | None) -> Dict[str, Any] | None:
+    """Return the last ingest result captured for the given researcher run."""
+    if not run_id:
+        return None
+    with _INGEST_OBSERVATIONS_LOCK:
+        observation = _INGEST_OBSERVATIONS.get(run_id)
+        return dict(observation) if observation is not None else None
+
+
+def clear_ingest_observation(run_id: str | None) -> None:
+    """Drop ingest observation once request-level summary has been emitted."""
+    if not run_id:
+        return
+    with _INGEST_OBSERVATIONS_LOCK:
+        _INGEST_OBSERVATIONS.pop(run_id, None)
+
+
+def _record_ingest_observation(run_id: str | None, result: Dict[str, Any]) -> None:
+    """Persist ingest observation in a process-wide map keyed by run_id."""
+    if not run_id:
+        return
+    with _INGEST_OBSERVATIONS_LOCK:
+        _INGEST_OBSERVATIONS[run_id] = dict(result)
 
 
 # Hàm nội bộ này thực hiện HTTP POST thật tới ingest API.
@@ -87,7 +110,7 @@ def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
             "success": False,
             "error": "Alex API not configured. Running in local mode."
         }
-        _LAST_INGEST_RESULT.set(result)
+        _record_ingest_observation(run_id, result)
         logger.info(
             "research_ingest run_id=%s success=%s topic=%s document_id=%s error=%s",
             run_id,
@@ -113,7 +136,7 @@ def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
             "document_id": ingest_result.get("document_id"),  # Changed from documentId
             "message": f"Successfully ingested analysis for {topic}"
         }
-        _LAST_INGEST_RESULT.set(result)
+        _record_ingest_observation(run_id, result)
         logger.info(
             "research_ingest run_id=%s success=%s topic=%s document_id=%s error=%s",
             run_id,
@@ -128,7 +151,7 @@ def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
             "success": False,
             "error": str(e)
         }
-        _LAST_INGEST_RESULT.set(result)
+        _record_ingest_observation(run_id, result)
         logger.info(
             "research_ingest run_id=%s success=%s topic=%s document_id=%s error=%s",
             run_id,

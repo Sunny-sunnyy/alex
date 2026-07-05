@@ -848,3 +848,102 @@ The honest post-Task-5 state is:
 - the next likely work item is either:
   - tighten request-end ingest propagation, or
   - define/implement a stricter server-side quality gate for true `success_verified`
+
+## Follow-up completed: request_end ingest_success now reads run-scoped ingest telemetry
+
+After Task 5 was committed and pushed, I completed the small observability follow-up the user requested.
+
+### Files edited
+
+- `backend/researcher/tools.py`
+- `backend/researcher/server.py`
+- `backend/researcher/BUG_AND_FIX.md`
+- `backend/researcher/OBSERVABILITY_AND_BENCHMARK_SPEC.md`
+- `backend/researcher/session_handoff.md`
+- `backend/researcher/README.md`
+
+### What changed
+
+The earlier implementation used a `ContextVar` to keep the last ingest result.
+
+That was not stable enough for request-final summary lookup, because some runs still showed:
+
+- `research_ingest success=True`
+- `request_end ingest_success=None`
+
+I replaced that with:
+
+- a small process-wide observation map keyed by `run_id`
+- lock-protected writes/reads
+- explicit cleanup after `request_end`
+
+### Verification
+
+Representative deployed run:
+
+- `uv run test_research.py "Microsoft cloud revenue growth"`
+
+CloudWatch evidence:
+
+- `research_ingest run_id=ae77f7cf-0d61-422a-8dc1-9cb9b9c723aa success=True ... document_id=8fee18af-4a31-401f-bf2e-805f970103f1`
+- `research_run request_end run_id=ae77f7cf-0d61-422a-8dc1-9cb9b9c723aa ... ingest_success=True degraded_reason=web_research_failed ...`
+
+### Updated current state
+
+- browser behavior is unchanged by this follow-up
+- request-final ingest observability is stronger than before
+- fallback classification is still an area to keep watching as prompt phrasing evolves
+
+## New issue confirmed for the next session
+
+After the ingest-propagation follow-up, I re-ran:
+
+- `Microsoft cloud revenue growth`
+
+and confirmed a separate remaining browser/content issue.
+
+### What the latest run proved
+
+The system still:
+
+- returns `200 OK`
+- logs `research_ingest success=True`
+- logs `request_end ingest_success=True`
+
+But it still does **not** reliably extract usable web content.
+
+### CloudWatch evidence
+
+In the same run:
+
+- Playwright launched successfully
+- `browser_run status=ok`
+- navigation attempted direct URLs
+
+Yet the browser path moved through:
+
+- `https://www.investopedia.com/terms/m/microsoftcloud.asp`
+- `about:blank`
+- `https://edition.cnn.com/...`
+- `about:srcdoc`
+- `https://a125375509.cdn.optimizely.com/client_storage/a125375509.html`
+
+The response still ended as:
+
+- `success_fallback`
+- degraded reason:
+  - `page_not_found`
+
+### Why this matters
+
+This means the next session should not focus only on:
+
+- ingest telemetry
+- browser startup
+- turn limits
+
+It should focus specifically on:
+
+- article-URL integrity
+- redirect/interstitial detection
+- verifying that the page is still a real article page before trusting snapshot-based extraction

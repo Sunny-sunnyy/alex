@@ -302,6 +302,72 @@ và redeploy lại.
 - nhưng chưa phải bằng chứng rằng browser-verifiable success đã ổn định
 - fallback vẫn là đường cứu chính của hệ thống
 
+## Follow-up update: request-end ingest propagation
+
+Sau Task 5, có một follow-up nhỏ đã được làm để xử lý đúng phần observability còn hở:
+
+- một số run từng có:
+  - `research_ingest success=True`
+  - nhưng `request_end ingest_success=None`
+
+### Fix đã áp dụng
+
+Thay vì giữ ingest observation trong `ContextVar` kết quả cuối, runtime giờ dùng:
+
+- map toàn cục theo `run_id`
+- lock-protected read/write
+- cleanup sau `request_end`
+
+### Verification mới nhất
+
+Run xác minh:
+
+- `Microsoft cloud revenue growth`
+
+CloudWatch cho cùng `run_id`:
+
+- `research_ingest success=True`
+- `request_end ingest_success=True`
+
+### Kết luận cập nhật
+
+Hiện tại:
+
+- tool-level ingest evidence vẫn là source mạnh nhất
+- `request_end ingest_success` đã khớp lại đúng với tool result trong run verify mới nhất
+- phần observability gap này đã được thu hẹp đáng kể
+
+## Remaining browser-content gap to carry into the next session
+
+Verification mới nhất cho:
+
+- `Microsoft cloud revenue growth`
+
+cho thấy một vấn đề còn lại cần ghi rõ cho session sau:
+
+- browser run có thể hoàn thành với `status=ok`
+- nhưng vẫn không lấy được **usable article content**
+
+CloudWatch đã cho thấy browser đi qua các path như:
+
+- direct Investopedia URL
+- `about:blank`
+- CNN URL
+- `about:srcdoc`
+- Optimizely client-storage URL
+
+Điều này gợi ý rằng pha cần xử lý tiếp không chỉ là:
+
+- timeout
+- fallback
+- ingest
+
+mà còn là:
+
+- article-page validation
+- redirect / interstitial / client-storage detection
+- chỉ snapshot khi URL/page state vẫn còn là một article page thật
+
 ## 2. Terminal-friendly output
 
 `backend/researcher/test_research.py` sẽ được cải tiến để hiển thị rõ hơn.

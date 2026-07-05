@@ -86,6 +86,7 @@ Hiện tại Researcher đã:
   - browser loop pressure đã giảm
   - fallback output usable hơn
   - `uv run deploy.py` hiện đang deploy được lại
+  - follow-up ingest propagation đã làm `request_end ingest_success` khớp hơn với tool-level ingest logs
 
 Nhưng vẫn còn hạn chế:
 
@@ -93,6 +94,8 @@ Nhưng vẫn còn hạn chế:
 - nhiều request vẫn thành công nhờ fallback;
 - chưa chứng minh được `success_verified` ổn định trên production runtime hiện tại.
 - ngay cả khi có `research_ingest success=True`, `request_end ingest_success` vẫn chưa phản ánh đúng trong mọi run.
+- một issue mới đã được xác nhận:
+  - browser có thể `status=ok` nhưng vẫn không lấy được article content usable vì rơi vào `about:blank`, `about:srcdoc`, hoặc client-storage/interstitial paths.
 
 ## Các file trong folder
 

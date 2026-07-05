@@ -261,6 +261,25 @@ Conclusion after Task 5:
 - it reduces loop-heavy behavior and improves degraded output quality
 - it still does not prove stable browser-based `success_verified`
 
+Follow-up after Task 5:
+
+- replaced the request-scoped ingest-result `ContextVar` storage with a run-id-keyed process map in `backend/researcher/tools.py`
+- updated `server.py` to resolve `ingest_success` by explicit `run_id` and clear the observation after `request_end`
+
+Representative deployed verification:
+
+- `uv run backend/researcher/test_research.py "Microsoft cloud revenue growth"`
+
+Observed CloudWatch result for run `ae77f7cf-0d61-422a-8dc1-9cb9b9c723aa`:
+
+- `research_ingest ... success=True ... document_id=8fee18af-4a31-401f-bf2e-805f970103f1`
+- `request_end ... outcome=success_fallback ingest_success=True degraded_reason=web_research_failed ...`
+
+Conclusion after the follow-up:
+
+- the request-end ingest propagation gap is materially smaller than before
+- future observability work no longer needs to treat this specific mismatch as the default expected behavior
+
 ## Global Constraints
 
 - Fix bug instability before benchmarking models.

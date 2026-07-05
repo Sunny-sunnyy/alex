@@ -27,6 +27,8 @@ PLAYWRIGHT_BROWSER_FALLBACK = "/ms-playwright/chromium-1208/chrome-linux64/chrom
 PLAYWRIGHT_STDERR_MAX_LENGTH = 4000
 
 
+# Helper này cắt log stderr/tool output quá dài để tránh làm CloudWatch khó đọc.
+# Nó đặc biệt hữu ích khi Playwright in nhiều dòng debug hoặc stack trace.
 def _trim_for_log(value: Any, max_length: int = PLAYWRIGHT_STDERR_MAX_LENGTH) -> str:
     text = str(value)
     if len(text) <= max_length:

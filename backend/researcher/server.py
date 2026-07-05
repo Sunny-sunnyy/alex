@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 from context import get_agent_instructions, DEFAULT_RESEARCH_PROMPT
 from mcp_servers import create_playwright_mcp_server
 from tools import (
+    clear_ingest_observation,
     get_last_ingest_observation,
     ingest_financial_document,
     reset_ingest_observation,
@@ -219,9 +220,9 @@ def _infer_ingest_success(response_text: str) -> bool | None:
     return None
 
 
-def _resolve_ingest_success(response_text: str) -> bool | None:
+def _resolve_ingest_success(run_id: str, response_text: str) -> bool | None:
     """Prefer tool-level ingest telemetry over response-text heuristics when available."""
-    observation = get_last_ingest_observation()
+    observation = get_last_ingest_observation(run_id)
     if observation is not None:
         success = observation.get("success")
         if isinstance(success, bool):
@@ -502,7 +503,7 @@ async def run_research_agent(topic: str = None) -> str:
         # Khối finally này luôn cố gắng phát ra request_end summary dù request đi nhánh nào.
         if response_text:
             trace_state.degraded_reason = _detect_degraded_reason(response_text)
-            trace_state.ingest_success = _resolve_ingest_success(response_text)
+            trace_state.ingest_success = _resolve_ingest_success(trace_state.run_id, response_text)
             trace_state.outcome = _classify_outcome(
                 used_browser=used_browser,
                 used_fallback=used_fallback,
@@ -521,6 +522,7 @@ async def run_research_agent(topic: str = None) -> str:
             trace_state.degraded_reason,
             total_duration_ms,
         )
+        clear_ingest_observation(trace_state.run_id)
         set_ingest_run_id(None)
 
     return response_text

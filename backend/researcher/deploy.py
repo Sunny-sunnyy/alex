@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# File này là script deploy researcher lên AWS Lambda bằng container image.
+# Nó build image, push lên ECR, cập nhật Terraform override, rồi apply hạ tầng.
 """
 Deploy researcher service to AWS Lambda.
 Cross-platform deployment script for Mac/Windows/Linux.
@@ -17,6 +19,8 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 
+# Hàm tiện ích này chạy command shell và dừng ngay nếu command lỗi.
+# Nó giúp toàn bộ script deploy có cùng một cách xử lý lỗi.
 def run_command(cmd, capture_output=False, cwd=None):
     """Run a command and handle errors."""
     try:
@@ -37,6 +41,7 @@ def run_command(cmd, capture_output=False, cwd=None):
         sys.exit(1)
 
 
+# Hàm này bọc terraform apply để deploy nhanh theo thư mục và target tùy chọn.
 def terraform_apply(terraform_dir: Path, targets: list[str] | None = None):
     command = ["terraform", "apply", "-auto-approve"]
     for target in targets or []:
@@ -44,6 +49,8 @@ def terraform_apply(terraform_dir: Path, targets: list[str] | None = None):
     run_command(command, cwd=terraform_dir)
 
 
+# Hàm này đọc một output raw từ Terraform.
+# Nó thường được dùng để lấy ECR URL, function name, hoặc researcher URL sau deploy.
 def terraform_output(terraform_dir: Path, output_name: str) -> str:
     return run_command(
         ["terraform", "output", "-raw", output_name],
@@ -52,17 +59,21 @@ def terraform_output(terraform_dir: Path, output_name: str) -> str:
     )
 
 
+# Hàm này xác định repo root bằng git để script có thể tìm đúng backend và terraform dir.
 def get_repo_root() -> Path:
     return Path(
         run_command(["git", "rev-parse", "--show-toplevel"], capture_output=True)
     )
 
 
+# Hàm này ghi file auto.tfvars tạm để Terraform biết image URI mới cần deploy.
 def write_image_override(terraform_dir: Path, image_uri: str):
     override_path = terraform_dir / "researcher.auto.tfvars.json"
     override_path.write_text(json.dumps({"researcher_image_uri": image_uri}, indent=2) + "\n")
 
 
+# Hàm này poll trạng thái Lambda sau update image.
+# Mục tiêu là chỉ kết thúc script khi function đã Active và update thành công.
 def wait_for_lambda_active(region: str, function_name: str):
     print("\nWaiting for Lambda update to complete...")
     for _ in range(60):
@@ -112,6 +123,14 @@ def wait_for_lambda_active(region: str, function_name: str):
     print("\n⚠️ Lambda update is taking longer than expected.")
 
 
+# Đây là orchestration chính của quy trình deploy.
+# Các bước lớn:
+# 1. Lấy account/region.
+# 2. Bảo đảm ECR tồn tại.
+# 3. Login ECR.
+# 4. Build và push image.
+# 5. Ghi image URI cho Terraform.
+# 6. Apply Terraform và chờ Lambda Active.
 def main():
     print("Alex Researcher Service - Lambda Deployment")
     print("==========================================")
@@ -176,14 +195,17 @@ def main():
     local_image = f"alex-researcher:{image_tag}"
     remote_image = f"{ecr_url}:{image_tag}"
 
-    # Build Docker image
+    # Build a single-arch image that AWS Lambda can consume.
     print(f"\nBuilding Docker image for linux/amd64 with tag: {image_tag}")
     run_command(
         [
             "docker",
+            "buildx",
             "build",
             "--platform",
             "linux/amd64",
+            "--provenance=false",
+            "--load",
             "-t",
             local_image,
             ".",

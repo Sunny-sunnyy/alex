@@ -1,3 +1,5 @@
+# File này gom cấu hình và helper để tạo Playwright MCP server.
+# Đây là phần chịu trách nhiệm browser automation cho Researcher agent khi cần duyệt web.
 """
 MCP server configurations for the Alex Researcher
 """
@@ -32,13 +34,19 @@ def _trim_for_log(value: Any, max_length: int = PLAYWRIGHT_STDERR_MAX_LENGTH) ->
     return f"{text[:max_length]}... [trimmed {len(text) - max_length} chars]"
 
 
+# Lớp này mở rộng MCPServerStdio để đọc stderr của subprocess và đẩy vào logger.
+# Nó rất hữu ích khi cần soi lỗi Playwright/MCP trong Lambda hoặc local container.
 class LoggingMCPServerStdio(MCPServerStdio):
+    # Hàm này tạo stream stdio cho MCP subprocess và đồng thời drain stderr sang log.
+    # Nhờ đó các lỗi của Playwright không bị mất khi process con chạy nền.
     @asynccontextmanager
     async def create_streams(self):
         read_fd, write_fd = os.pipe()
         stderr_reader = os.fdopen(read_fd, "r", encoding="utf-8", errors="replace")
         stderr_writer = os.fdopen(write_fd, "w", encoding="utf-8", errors="replace")
 
+        # Hàm con này chạy trên thread riêng để đọc stderr liên tục.
+        # Cách làm này tránh block luồng async chính của MCP session.
         def drain_stderr() -> None:
             try:
                 for line in stderr_reader:
@@ -65,6 +73,8 @@ class LoggingMCPServerStdio(MCPServerStdio):
             stderr_thread.join(timeout=1)
 
 
+# Hàm factory này tạo MCP server đã cấu hình sẵn cho Playwright.
+# Nó chuẩn hóa browser args, chrome path, config file tạm và logging behavior.
 def create_playwright_mcp_server(timeout_seconds=120):
     """Create a Playwright MCP server instance for web browsing.
 
@@ -74,6 +84,7 @@ def create_playwright_mcp_server(timeout_seconds=120):
     Returns:
         MCPServerStdio instance configured for Playwright
     """
+    # Các args này tối ưu cho môi trường headless/container và hạn chế lỗi sandbox.
     args = [
         "--headless",
         "--isolated",
@@ -97,6 +108,8 @@ def create_playwright_mcp_server(timeout_seconds=120):
         )
         args.extend(["--executable-path", chrome_path])
 
+    # File config được ghi vào /tmp để có chỗ writable trong container/Lambda.
+    # Đây là nơi thêm launchOptions cho Chromium.
     config_path = "/tmp/playwright-mcp.config.json"
     config = {
         "browser": {

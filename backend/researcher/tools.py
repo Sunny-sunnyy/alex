@@ -1,3 +1,5 @@
+# File này định nghĩa tool mà agent dùng để lưu kết quả research vào knowledge base.
+# Đây là cầu nối giữa Researcher service và ingest API của Part 3.
 """
 Tools for the Alex Researcher agent
 """
@@ -13,6 +15,8 @@ ALEX_API_ENDPOINT = os.getenv("ALEX_API_ENDPOINT")
 ALEX_API_KEY = os.getenv("ALEX_API_KEY")
 
 
+# Hàm nội bộ này thực hiện HTTP POST thật tới ingest API.
+# Nó được tách riêng để lớp retry ở bên ngoài có thể tái sử dụng mà không lặp code.
 def _ingest(document: Dict[str, Any]) -> Dict[str, Any]:
     """Internal function to make the actual API call."""
     with httpx.Client() as client:
@@ -30,11 +34,15 @@ def _ingest(document: Dict[str, Any]) -> Dict[str, Any]:
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10)
 )
+# Hàm này bọc _ingest bằng retry/backoff để chịu được cold start hoặc lỗi mạng ngắn hạn.
+# Đây là lớp tăng độ bền cho tool ingest trong runtime production.
 def ingest_with_retries(document: Dict[str, Any]) -> Dict[str, Any]:
     """Ingest with retry logic for SageMaker cold starts."""
     return _ingest(document)
 
 
+# Đây là function tool mà agent có thể gọi trực tiếp.
+# Nhiệm vụ của nó là đóng gói topic/analysis thành document và gửi sang ingest pipeline.
 @function_tool
 def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
     """

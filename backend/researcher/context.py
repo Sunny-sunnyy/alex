@@ -1,9 +1,13 @@
+# File này chứa prompt và instructions cho Researcher agent.
+# Nhiệm vụ của nó là gom toàn bộ chỉ dẫn hành vi vào một nơi để dễ chỉnh và dễ đọc.
 """
 Agent instructions and prompts for the Alex Researcher
 """
 from datetime import datetime
 
 
+# Hàm này dựng instructions động có kèm ngày hiện tại.
+# Việc chèn ngày giúp agent hiểu đúng ngữ cảnh thời gian khi nghiên cứu tin tức tài chính.
 def get_agent_instructions():
     """Get agent instructions with current date."""
     today = datetime.now().strftime("%B %d, %Y")
@@ -15,8 +19,10 @@ CRITICAL: Work quickly and efficiently. You have limited time.
 Your THREE steps (BE CONCISE):
 
 1. WEB RESEARCH (1-2 pages MAX):
-   - Navigate to ONE main source (Yahoo Finance or MarketWatch)
-   - Use browser_snapshot to read content
+   - Prefer Reuters, AP News, or a direct MarketWatch article page
+   - Avoid noisy finance homepages, ad links, trackers, consent pages, and blank tabs
+   - Use browser_snapshot on the first useful content page
+   - If the page is noisy or redirects to ads, stop and open a cleaner source directly
    - If needed, visit ONE more page for verification
    - DO NOT browse extensively - 2 pages maximum
 

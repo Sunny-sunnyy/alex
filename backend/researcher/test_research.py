@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# File này là script test end-to-end cho Researcher service đã deploy.
+# Nó tự tìm researcher URL, kiểm tra health, rồi gọi /research để quan sát kết quả thực tế.
 """
 Test the researcher service by generating investment research.
 Cross-platform script for Mac/Windows/Linux.
@@ -17,6 +19,7 @@ import requests
 TERRAFORM_DIR = "terraform/4_researcher"
 
 
+# Hàm này xác định repo root bằng git để script chạy ổn từ nhiều thư mục khác nhau.
 def get_repo_root() -> Path:
     return Path(
         subprocess.run(
@@ -28,6 +31,8 @@ def get_repo_root() -> Path:
     )
 
 
+# Hàm này lấy URL public của researcher service.
+# Nó hỗ trợ cả local mode và mode lấy output từ Terraform.
 def get_service_url():
     """Get the researcher service URL."""
     if os.getenv("LOCAL") == "True":
@@ -48,6 +53,8 @@ def get_service_url():
         sys.exit(1)
 
 
+# Đây là luồng test chính của script.
+# Nó lần lượt kiểm tra URL, gọi /health, rồi gọi /research và in kết quả ra console.
 def test_research(topic=None):
     """Test the researcher service with a topic."""
     # If no topic, let the agent pick one
@@ -120,6 +127,8 @@ def test_research(topic=None):
         sys.exit(1)
 
 
+# Hàm main chỉ lo parse CLI arguments rồi gọi test_research().
+# Cách tách này giúp script dễ đọc và dễ mở rộng về sau.
 def main():
     parser = argparse.ArgumentParser(
         description="Test the Alex Researcher service",

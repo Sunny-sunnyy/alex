@@ -1,3 +1,5 @@
+# File này định nghĩa researcher như một uv project độc lập.
+# Nó mô tả version Python và các dependency cần thiết để chạy local, test, và build container.
 [project]
 name = "researcher"
 version = "0.1.0"

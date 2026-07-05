@@ -1,3 +1,5 @@
+# File Terraform này là trung tâm của Part 4 trong implementation hiện tại của repo.
+# Nó tạo ECR, Lambda researcher dùng container image, Function URL public, và scheduler tùy chọn.
 terraform {
   required_version = ">= 1.5"
 
@@ -13,15 +15,17 @@ provider "aws" {
   region = var.aws_region
 }
 
-# Data source for current caller identity
+# Data source này đọc account hiện tại để dựng ARN/policy chính xác.
 data "aws_caller_identity" "current" {}
 
+# locals này quyết định Terraform có thật sự tạo researcher Lambda hay không.
+# Nếu chưa có image URI thì chỉ tạo phần ECR/role cần thiết cho bước deploy đầu.
 locals {
   researcher_deployed = var.researcher_image_uri != ""
   scheduler_active    = var.scheduler_enabled && local.researcher_deployed
 }
 
-# ECR repository for the researcher Docker image
+# Repository này lưu Docker image của researcher trước khi Lambda pull về.
 resource "aws_ecr_repository" "researcher" {
   name                 = "alex-researcher"
   image_tag_mutability = "MUTABLE"
@@ -37,7 +41,7 @@ resource "aws_ecr_repository" "researcher" {
   }
 }
 
-# Allow Lambda to pull images from ECR
+# Policy này cho phép Lambda lấy image layers từ ECR.
 resource "aws_ecr_repository_policy" "researcher_lambda_access" {
   repository = aws_ecr_repository.researcher.name
 
@@ -64,7 +68,7 @@ resource "aws_ecr_repository_policy" "researcher_lambda_access" {
   })
 }
 
-# IAM role for researcher Lambda
+# Role này là danh tính AWS của researcher Lambda khi function chạy.
 resource "aws_iam_role" "researcher_lambda_role" {
   name = "alex-researcher-lambda-role"
 
@@ -87,13 +91,13 @@ resource "aws_iam_role" "researcher_lambda_role" {
   }
 }
 
-# Lambda basic execution policy
+# Policy managed này cấp quyền ghi log CloudWatch cơ bản cho Lambda.
 resource "aws_iam_role_policy_attachment" "researcher_lambda_basic" {
   role       = aws_iam_role.researcher_lambda_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Policy for researcher Lambda to access Bedrock
+# Inline policy này giữ quyền Bedrock cho researcher runtime cũ hoặc khi cần debug AWS model access.
 resource "aws_iam_role_policy" "researcher_lambda_bedrock_access" {
   name = "alex-researcher-lambda-bedrock-policy"
   role = aws_iam_role.researcher_lambda_role.id
@@ -114,7 +118,8 @@ resource "aws_iam_role_policy" "researcher_lambda_bedrock_access" {
   })
 }
 
-# Researcher Lambda function
+# Đây là Lambda researcher thật sự.
+# Nó chỉ được tạo khi Terraform đã biết image URI cần deploy.
 resource "aws_lambda_function" "researcher" {
   count         = local.researcher_deployed ? 1 : 0
   function_name = "alex-researcher"
@@ -129,9 +134,11 @@ resource "aws_lambda_function" "researcher" {
     size = 2048
   }
 
+  # Các biến môi trường này truyền cấu hình model, ingest API, và logging vào runtime.
   environment {
     variables = {
       OPENAI_API_KEY    = var.openai_api_key
+      OPENROUTER_API_KEY = var.openrouter_api_key
       ALEX_API_ENDPOINT = var.alex_api_endpoint
       ALEX_API_KEY      = var.alex_api_key
       BEDROCK_REGION    = var.bedrock_region
@@ -146,13 +153,14 @@ resource "aws_lambda_function" "researcher" {
   }
 }
 
-# Public function URL for the researcher service
+# Function URL public là endpoint HTTPS bên ngoài dùng để gọi /health và /research.
 resource "aws_lambda_function_url" "researcher" {
   count              = local.researcher_deployed ? 1 : 0
   function_name      = aws_lambda_function.researcher[0].function_name
   authorization_type = "NONE"
 }
 
+# Permission này cho phép public invoke qua Function URL.
 resource "aws_lambda_permission" "allow_public_function_url_invoke" {
   count                    = local.researcher_deployed ? 1 : 0
   statement_id             = "AllowPublicFunctionInvokeViaUrl"
@@ -162,7 +170,8 @@ resource "aws_lambda_permission" "allow_public_function_url_invoke" {
   invoked_via_function_url = true
 }
 
-# IAM role for EventBridge
+# Role này chỉ tồn tại khi scheduler được bật.
+# Nó cho phép EventBridge Scheduler invoke scheduler Lambda.
 resource "aws_iam_role" "eventbridge_role" {
   count = local.scheduler_active ? 1 : 0
   name  = "alex-eventbridge-scheduler-role"
@@ -186,7 +195,8 @@ resource "aws_iam_role" "eventbridge_role" {
   }
 }
 
-# Lambda function for invoking researcher
+# Lambda scheduler là lớp trung gian gọi researcher theo lịch.
+# Nó cần thiết vì Function URL research có thể chạy lâu hơn timeout của một số integration trực tiếp.
 resource "aws_lambda_function" "scheduler_lambda" {
   count         = local.scheduler_active ? 1 : 0
   function_name = "alex-researcher-scheduler"
@@ -210,7 +220,7 @@ resource "aws_lambda_function" "scheduler_lambda" {
   }
 }
 
-# IAM role for scheduler Lambda
+# Role này là danh tính AWS của scheduler Lambda.
 resource "aws_iam_role" "lambda_scheduler_role" {
   count = local.scheduler_active ? 1 : 0
   name  = "alex-scheduler-lambda-role"
@@ -234,14 +244,14 @@ resource "aws_iam_role" "lambda_scheduler_role" {
   }
 }
 
-# Lambda basic execution policy
+# Gắn policy log cơ bản cho scheduler Lambda.
 resource "aws_iam_role_policy_attachment" "lambda_scheduler_basic" {
   count      = local.scheduler_active ? 1 : 0
   role       = aws_iam_role.lambda_scheduler_role[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# EventBridge schedule
+# Schedule này chạy mỗi 2 giờ khi scheduler_enabled=true.
 resource "aws_scheduler_schedule" "research_schedule" {
   count = local.scheduler_active ? 1 : 0
   name  = "alex-research-schedule"
@@ -258,7 +268,7 @@ resource "aws_scheduler_schedule" "research_schedule" {
   }
 }
 
-# Permission for EventBridge to invoke Lambda
+# Permission này cho phép EventBridge Scheduler invoke scheduler Lambda.
 resource "aws_lambda_permission" "allow_eventbridge" {
   count         = local.scheduler_active ? 1 : 0
   statement_id  = "AllowExecutionFromEventBridge"
@@ -268,7 +278,7 @@ resource "aws_lambda_permission" "allow_eventbridge" {
   source_arn    = aws_scheduler_schedule.research_schedule[0].arn
 }
 
-# Policy for EventBridge to invoke Lambda
+# Policy này trao cho role của EventBridge quyền gọi scheduler Lambda.
 resource "aws_iam_role_policy" "eventbridge_invoke_lambda" {
   count = local.scheduler_active ? 1 : 0
   name  = "InvokeLambdaPolicy"

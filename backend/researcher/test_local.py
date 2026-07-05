@@ -1,4 +1,6 @@
-# \!/usr/bin/env python3
+#!/usr/bin/env python3
+# File này dùng để thử Researcher agent ở local trước khi deploy.
+# Nó phù hợp để kiểm tra nhanh prompt, MCP và tool ingest mà không cần đi qua AWS URL.
 """
 Test the researcher locally before deployment
 """
@@ -13,6 +15,8 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 
+# Hàm này chạy agent local với prompt mặc định và in final output.
+# Nó là bài test đơn giản nhất để biết local runtime có hoạt động không.
 async def test_local():
     """Test the researcher agent locally."""
     print("Testing researcher agent locally...")

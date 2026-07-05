@@ -280,6 +280,36 @@ Conclusion after the follow-up:
 - the request-end ingest propagation gap is materially smaller than before
 - future observability work no longer needs to treat this specific mismatch as the default expected behavior
 
+Verified-web-only enforcement update:
+
+- requirement changed so fallback notes must not be ingested into S3 Vectors
+- `backend/researcher/tools.py` now requires a clean `source_url`
+- `backend/researcher/server.py` now fails `/research` with `500` unless verified web content is proven
+- primary browser max turns increased to `30`
+
+Representative live verification after this pass:
+
+- `uv run backend/researcher/test_research.py "Microsoft cloud revenue growth"`
+- `uv run backend/researcher/test_research.py "Tesla competitive advantages"`
+
+Observed outcome:
+
+- both requests failed by design rather than ingesting fallback notes
+- Microsoft first failed with:
+  - `Verified web content not obtained: page_not_found.`
+- after anti-fabrication prompt tightening, Microsoft failed with:
+  - `Verified web content not obtained: ingest did not record a clean source URL.`
+- Tesla failed with:
+  - `Verified web content not obtained: page_unavailable.`
+
+Important conclusion from the latest live CloudWatch evidence:
+
+- the anti-fabrication prompt improved correctness by pushing the agent toward real search discovery instead of immediate guessed article slugs
+- a runtime experiment removed Playwright `--single-process` because Chromium logged:
+  - `Cannot use V8 Proxy resolver in single process mode`
+- this experiment did not yet produce a verified successful Microsoft run
+- browser-content retrieval in Lambda is still the dominant unresolved issue
+
 ## Global Constraints
 
 - Fix bug instability before benchmarking models.

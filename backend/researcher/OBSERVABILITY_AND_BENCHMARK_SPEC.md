@@ -368,6 +368,75 @@ mà còn là:
 - redirect / interstitial / client-storage detection
 - chỉ snapshot khi URL/page state vẫn còn là một article page thật
 
+## Verified-web-only enforcement update
+
+Sau phase observability + fallback stabilization, requirement đã được đổi sang:
+
+- chỉ ingest khi có **verified web-derived content**
+- fallback note từ general knowledge không còn được phép đi vào S3 Vectors
+- `/research` phải fail nếu không lấy được article content thật
+
+### Thay đổi đã áp dụng
+
+- `browser_run` tăng lên `30` turns
+- `ingest_financial_document` giờ yêu cầu:
+  - `source_url`
+  - clean direct article URL
+- runtime chặn ingest nếu analysis mang dấu hiệu:
+  - fallback
+  - degraded
+  - unverified content
+- server-side gate mới trả `500` khi:
+  - không có clean source URL
+  - hoặc browser không chứng minh được nội dung web thật
+
+### Verification live quan trọng
+
+Run:
+
+- `Microsoft cloud revenue growth`
+
+đã cho hai trạng thái quan trọng theo thứ tự:
+
+1. trước anti-fabrication prompt:
+   - fail với:
+     - `Verified web content not obtained: page_not_found.`
+2. sau anti-fabrication prompt:
+   - fail với:
+     - `Verified web content not obtained: ingest did not record a clean source URL.`
+
+Ý nghĩa:
+
+- correctness đã tốt hơn
+- fallback note không còn bị ingest
+- agent đã bị đẩy ra khỏi hành vi đoán URL article rồi lưu bừa
+
+### Runtime experiment mới nhất
+
+CloudWatch liên tục cho thấy Chromium log:
+
+- `Cannot use V8 Proxy resolver in single process mode`
+
+Vì vậy đã có thử nghiệm:
+
+- bỏ `--single-process` khỏi Playwright launch args
+
+Kết quả hiện tại:
+
+- chưa tạo ra được `success_verified` ổn định cho benchmark Microsoft
+- browser vẫn drift vào:
+  - `about:blank`
+  - `about:srcdoc`
+  - ad-tech / sync / iframe / client-storage paths
+
+### Trạng thái đúng hiện tại
+
+- ingest correctness: cải thiện rõ
+- browser-content retrieval stability: vẫn chưa được chứng minh
+- benchmark future nên đánh giá riêng hai câu hỏi:
+  - request có fail đúng khi không có verified content không
+  - và browser có thật sự lấy được clean article body không
+
 ## 2. Terminal-friendly output
 
 `backend/researcher/test_research.py` sẽ được cải tiến để hiển thị rõ hơn.

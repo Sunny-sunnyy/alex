@@ -154,11 +154,23 @@ def _detect_degraded_reason(response_text: str) -> str | None:
     lowered = response_text.lower()
     degraded_markers = {
         "quick high-level note": "quick_high_level_note",
+        "quick high-level fallback note": "quick_high_level_fallback_note",
         "no web research": "no_web_research",
+        "web research failed": "web_research_failed",
+        "web research blocked": "web_research_blocked",
+        "web sources blocked": "web_sources_blocked",
         "no web browsing": "no_web_browsing",
         "non-web-browsed overview": "non_web_browsed_overview",
+        "fallback note": "fallback_note",
+        "fallback (general market knowledge)": "fallback_general_market_knowledge",
+        "general market knowledge": "general_market_knowledge_fallback",
         "could not verify": "could_not_verify",
         "failed to access a clean direct article page": "no_clean_direct_article",
+        "no clean direct article found": "no_clean_direct_article_found",
+        "direct article pages were not accessible": "direct_article_pages_not_accessible",
+        "direct article pages are blocked or unusable": "direct_article_pages_blocked_or_unusable",
+        "couldn’t access clean direct articles": "no_clean_direct_articles",
+        "couldn't access clean direct articles": "no_clean_direct_articles",
         "page unavailable": "page_unavailable",
         "page not found": "page_not_found",
         "404": "http_404",
@@ -166,7 +178,9 @@ def _detect_degraded_reason(response_text: str) -> str | None:
         "access restricted": "access_restricted",
         "access-restricted": "access_restricted",
         "access temporarily restricted": "access_temporarily_restricted",
+        "browsing blocked": "browsing_blocked",
         "usable direct article page": "no_usable_direct_article_page",
+        "non-article/portal layouts": "non_article_portal_layout",
         "couldn't reliably quote": "could_not_reliably_quote",
         "couldn’t reliably quote": "could_not_reliably_quote",
         "clean, accessible article content": "no_clean_accessible_article_content",
@@ -243,7 +257,10 @@ def _build_research_query(topic: Optional[str], constrained: bool = False) -> st
             f"Research this investment topic: {topic}. "
             "Use a direct article page from Investopedia, AP News, or CNN Business if possible. "
             "Do not use finance homepages, market portals, tracker pages, or any source that redirects "
-            "to captcha or access-restricted interstitial pages. If a source is blocked, switch once and continue."
+            "to captcha or access-restricted interstitial pages. If a source is blocked, switch once and continue. "
+            "If both allowed direct article attempts fail, stop browsing, write a quick high-level fallback note "
+            "from general market knowledge, include one recommendation, and ingest it immediately. "
+            "Do not ask the user to provide another link or choose another source."
         )
 
     if constrained:
@@ -253,7 +270,9 @@ def _build_research_query(topic: Optional[str], constrained: bool = False) -> st
             "AP News, or CNN Business. Use Reuters only if the direct article page loads cleanly "
             "without captcha. Do not use finance homepages, market portals, ad links, or tracker "
             "pages. Use one content page, one snapshot, then write 3-5 concise bullets, one "
-            "recommendation, and call ingest_financial_document immediately."
+            "recommendation, and call ingest_financial_document immediately. If the direct article "
+            "pages are blocked or unusable, stop browsing and produce a quick high-level fallback "
+            "note instead of asking the user for another link."
         )
 
     return DEFAULT_RESEARCH_PROMPT
@@ -275,6 +294,11 @@ def _build_browserless_fallback_query(topic: Optional[str]) -> str:
         "is a quick high-level note, keep it to 3-5 bullets plus one recommendation, then call "
         "ingest_financial_document immediately."
     )
+
+
+def _should_use_faster_browser_limits(topic: Optional[str]) -> bool:
+    """Use tighter browser turn limits for the current large-cap benchmark-style topics."""
+    return bool(topic)
 
 
 # Hàm này là lớp thực thi agent dùng chung cho cả browser mode và browserless mode.
@@ -392,6 +416,8 @@ async def run_research_agent(topic: str = None) -> str:
     response_text: str | None = None
     used_browser = False
     used_fallback = False
+    browser_max_turns = 10 if _should_use_faster_browser_limits(topic) else 15
+    constrained_browser_max_turns = 8 if _should_use_faster_browser_limits(topic) else 12
 
     _start_phase(trace_state, "request_start")
 
@@ -400,7 +426,12 @@ async def run_research_agent(topic: str = None) -> str:
         _start_phase(trace_state, "browser_run")
         used_browser = True
         try:
-            response_text = await _run_research_query(query, model, max_turns=15, use_browser=True)
+            response_text = await _run_research_query(
+                query,
+                model,
+                max_turns=browser_max_turns,
+                use_browser=True,
+            )
             _end_phase(trace_state, "browser_run", status="ok")
         except MaxTurnsExceeded:
             _end_phase(
@@ -431,7 +462,7 @@ async def run_research_agent(topic: str = None) -> str:
                 response_text = await _run_research_query(
                     fallback_query,
                     model,
-                    max_turns=12,
+                    max_turns=constrained_browser_max_turns,
                     use_browser=True,
                 )
                 _end_phase(trace_state, "constrained_browser_run", status="ok")

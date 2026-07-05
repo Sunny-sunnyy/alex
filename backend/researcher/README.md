@@ -82,12 +82,17 @@ Hiện tại Researcher đã:
   - `research_ingest`
   - `document_id`
   - `success/error`
+- sau Task 5:
+  - browser loop pressure đã giảm
+  - fallback output usable hơn
+  - `uv run deploy.py` hiện đang deploy được lại
 
 Nhưng vẫn còn hạn chế:
 
 - browser path trong Lambda vẫn không ổn định hoàn toàn;
 - nhiều request vẫn thành công nhờ fallback;
 - chưa chứng minh được `success_verified` ổn định trên production runtime hiện tại.
+- ngay cả khi có `research_ingest success=True`, `request_end ingest_success` vẫn chưa phản ánh đúng trong mọi run.
 
 ## Các file trong folder
 

@@ -637,3 +637,216 @@ If a new session needs the shortest useful summary, use this:
   - browserless fallback
 - The current deployed Lambda now returns `200 OK` and ingests the result successfully.
 - Terraform in `terraform/4_researcher` still has provider/plugin issues and was bypassed for the final deploy using direct AWS Lambda image update.
+
+## Task 4 Evidence Pass - 2026-07-05
+
+After the newer observability work, I ran the fixed 5-topic benchmark set on the deployed Lambda runtime to refresh the diagnosis with current evidence rather than relying on older hypotheses.
+
+### Fixed topic set executed
+
+- `Tesla competitive advantages`
+- `Microsoft cloud revenue growth`
+- `NVIDIA AI datacenter demand`
+- `Amazon advertising growth`
+- `Apple services revenue growth`
+
+### Commands used
+
+- `uv run test_research.py "Tesla competitive advantages"`
+- `uv run test_research.py "Microsoft cloud revenue growth"`
+- `uv run test_research.py "NVIDIA AI datacenter demand"`
+- `uv run test_research.py "Amazon advertising growth"`
+- `uv run test_research.py "Apple services revenue growth"`
+- `aws logs tail /aws/lambda/alex-researcher --since 15m --region ap-southeast-1 | rg "research_run|research_ingest|mcp:stderr|Error calling tool"`
+
+### What the terminal runs showed
+
+All 5 runs returned:
+
+- HTTP `200 OK`
+- non-empty output
+- `Outcome: success_fallback`
+
+No `success_verified` run appeared in this 5-topic pass.
+
+### Evidence table
+
+| Topic | Run ID | Terminal Outcome | Degraded Signal | Phase Pattern | Ingest Evidence | Notes |
+|-------|--------|------------------|-----------------|---------------|-----------------|-------|
+| Tesla competitive advantages | `83a1c05b-e31e-429a-9e6e-71f5a32d7c51` | `success_fallback` | `no web research` | `browser_run max_turns` -> `constrained_browser_run max_turns` -> `browserless_fallback_run ok` | `research_ingest success=True`, but `request_end ingest_success=None` | strong browser loop/fallback evidence |
+| Microsoft cloud revenue growth | `5a9e661c-cb95-40e1-b5cd-8b7b8850349b` | `success_fallback` | `page not found` | `browser_run ok` | `research_ingest success=True`, but `request_end ingest_success=None` | output degraded due inaccessible article pages, not max turns |
+| NVIDIA AI datacenter demand | `633c89b8-7075-4cdd-b8df-a425a6bafc7e` | `success_fallback` | `page not found` | `browser_run ok` | no `research_ingest` line seen in filtered window; `request_end ingest_success=None` | response text mentioned tooling/storage error while trying Reuters snapshot |
+| Amazon advertising growth | `4944fbca-f75f-430c-a215-f6638ecca4f4` | `success_fallback` | `page unavailable` | `browser_run ok` | no `research_ingest` line seen in filtered window; `request_end ingest_success=None` | degraded due inaccessible direct pages |
+| Apple services revenue growth | `8eb7ea80-2ecc-46ce-8e6e-abf1a652b59a` | `success_fallback` | `quick high-level note` | `browser_run max_turns` -> `constrained_browser_run max_turns` -> `browserless_fallback_run ok` | `research_ingest success=True`, but `request_end ingest_success=None` | second strong browser loop/fallback case |
+
+### What this evidence weakens
+
+This pass does **not** provide strong current evidence that the main instability is:
+
+- Lambda Function URL availability
+- FastAPI startup
+- Bedrock/OpenAI authentication
+- a dominant `EROFS` / read-only filesystem failure mode
+
+That does not prove those issues cannot happen.
+It means the latest 5-topic benchmark does not support them as the primary diagnosis right now.
+
+### Current best-supported hypothesis
+
+The current primary instability is:
+
+1. browser-based research remains unreliable on the allowed direct-source set;
+2. some runs degrade after blocked/unusable direct article pages but still finish inside `browser_run`;
+3. some runs loop long enough to hit `MaxTurnsExceeded` twice and fall back to browserless output;
+4. therefore the system is usable mainly because fallback behavior rescues the request, not because browser verification is stable.
+
+### Important secondary finding
+
+This evidence pass also showed that the newer ingest observability is useful but still incomplete:
+
+- some runs emitted `research_ingest success=True`
+- the same run still ended with `request_end ingest_success=None`
+
+So any earlier statement that request-end ingest classification was fully solved is too strong.
+
+What is true now:
+
+- tool-level ingest evidence is better than before
+- request-level ingest classification is still incomplete in some runs
+- there is likely a context propagation gap between tool execution and request-final classification
+
+### Updated conclusion after Task 4
+
+At the end of this evidence pass, the honest system state is:
+
+- browser stability is still the primary production problem
+- the latest evidence supports `browser/content-access instability`, not `EROFS`, as the main root-cause direction
+- ingest observability improved, but request-end ingest certainty still needs follow-up
+- the next fix should target browser instability first, while keeping the ingest telemetry gap on the follow-up list
+
+## Task 5 Fix Pass - 2026-07-05
+
+Based on the Task 4 evidence, I did **not** pursue the older `/tmp` / `EROFS` theory as the next main fix.
+
+Instead, I applied a smaller behavior fix aimed at the actual current failure pattern:
+
+- blocked/unusable direct article pages
+- browser loops consuming too many turns
+- degraded outputs that ended by asking the user for another link/source
+
+### Files changed
+
+- `backend/researcher/context.py`
+- `backend/researcher/server.py`
+- `backend/researcher/test_research.py`
+
+### What changed
+
+In `context.py`:
+
+- told the agent that if both allowed direct article attempts fail, it must:
+  - stop browsing
+  - switch to a short fallback note from general market knowledge
+  - not ask the user for another link/source/retry choice
+
+In `server.py`:
+
+- strengthened topic-specific query strings with the same fallback rule
+- reduced browser turn limits for topic-driven runs:
+  - browser run: `15 -> 10`
+  - constrained browser run: `12 -> 8`
+- later extended degraded-result markers to catch newer fallback phrasings such as:
+  - `quick high-level fallback`
+  - `web sources blocked`
+  - `no clean direct article found`
+  - `browsing blocked`
+
+In `test_research.py`:
+
+- updated terminal fallback markers to match the new fallback phrasing so terminal summaries would not over-report `success_verified`
+
+### Deployment result
+
+Unlike earlier sessions, `uv run deploy.py` succeeded end-to-end for this fix pass.
+
+This matters because:
+
+- the live Lambda was updated through the normal repo deployment path
+- no manual `aws lambda update-function-code` fallback was required for this Task 5 code push
+
+Deployed image sequence during this pass:
+
+- `deploy-1783261751`
+- `deploy-1783262258`
+- `deploy-1783262370`
+
+### 5-topic verification after the main Task 5 behavior fix
+
+I reran the fixed benchmark set:
+
+- `Tesla competitive advantages`
+- `Microsoft cloud revenue growth`
+- `NVIDIA AI datacenter demand`
+- `Amazon advertising growth`
+- `Apple services revenue growth`
+
+#### Before Task 5
+
+Task 4 benchmark had:
+
+- 5/5 `success_fallback`
+- repeated `MaxTurnsExceeded` on some topics
+- multiple degraded outputs that ended by asking the user to supply another source/link
+
+#### After Task 5 behavior fix
+
+Observed improvements:
+
+- the “ask the user for another link” style degraded output disappeared in the benchmark rerun
+- outputs shifted toward **usable fallback notes** instead of deferring the work back to the user
+- no `browser_run max_turns` appeared in the first full 5-topic rerun after deployment
+- request durations dropped materially for several topics:
+  - `Tesla`: from about `104s` to about `37s`
+  - `Microsoft`: from about `54s` to about `11s`
+  - `Apple`: from about `112s` to about `64s` in the immediate 5-topic rerun, then about `18s` on a later representative rerun
+
+CloudWatch from the first Task 5 5-topic rerun showed:
+
+- `browser_run status=ok` for all five benchmark topics
+
+This is the strongest sign that the fix reduced the previous browser-loop burn.
+
+### Remaining issues after Task 5
+
+Task 5 improved behavior substantially, but it did **not** fully finish the area.
+
+Remaining issues:
+
+1. fallback is still common
+   - usable fallback output improved
+   - but browser-verified direct-source success is still not consistently proven
+
+2. ingest request-end summary still has gaps
+   - some runs still showed:
+     - `research_ingest success=True`
+     - but `request_end ingest_success=None`
+
+3. classification drift reappeared when fallback phrasing changed
+   - I patched both terminal-side and server-side markers
+   - then redeployed the marker fix
+
+### Current conclusion after Task 5
+
+Task 5 should be considered a **meaningful stability improvement**, not a full browser-success proof.
+
+What is now true:
+
+- browser loops are less dominant than before
+- fallback output is more usable and less likely to bounce work back to the user
+- the normal deployment path (`uv run deploy.py`) is currently working again
+
+What is still true:
+
+- fallback-heavy behavior remains
+- request-end ingest certainty still needs another follow-up
+- there is still room to tighten fallback classification and define what counts as true `success_verified`

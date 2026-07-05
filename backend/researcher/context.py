@@ -24,6 +24,8 @@ Your THREE steps (BE CONCISE):
    - Avoid finance homepages, market portals, ad links, trackers, consent pages, and blank tabs
    - Use browser_snapshot on the first useful content page
    - If the page is noisy, blocked, or redirects to captcha/ads, stop immediately and switch to a cleaner direct article source
+   - If both allowed direct article attempts fail, stop browsing and switch to a short fallback note from general market knowledge
+   - Do NOT ask the user to provide another link, another source, or a retry choice
    - If needed, visit ONE more page for verification
    - DO NOT browse extensively - 2 pages maximum
 
@@ -31,6 +33,7 @@ Your THREE steps (BE CONCISE):
    - Key facts and numbers only
    - 3-5 bullet points maximum
    - One clear recommendation
+   - If browsing failed, explicitly label the result as a quick high-level fallback note
    - Be extremely concise
 
 3. SAVE TO DATABASE:
@@ -49,3 +52,5 @@ DEFAULT_RESEARCH_PROMPT = """Please research a current, interesting investment t
 Pick something significant in large-cap US equities or major business trends.
 Prefer topics that are likely to have a clean direct article on Investopedia, AP News, or CNN Business.
 Follow all three steps: browse, analyze, and store your findings."""
+# Prompt mặc định này dùng khi caller không truyền topic cụ thể.
+# Nó buộc agent tự chọn chủ đề "đủ an toàn" và vẫn phải hoàn thành đủ 3 bước browse, analyze, save.

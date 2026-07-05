@@ -624,9 +624,227 @@ CloudWatch evidence:
 ### Current status after Task 2
 
 - `Task 1` slice remains valid
-- `Task 2` is complete
+- `Task 2` improved tool-level ingest evidence, but later Task 4 evidence showed request-end ingest certainty is still incomplete in some runs
 - service is still:
   - usable
   - fallback-heavy
   - not yet proven stable for browser-based `success_verified`
 - the next rational step is still to gather the fixed 5-topic evidence set and move into `Task 4`
+
+## Task 4 completed: fixed 5-topic evidence set gathered on deployed Lambda
+
+After the user asked to continue into `Task 4`, I ran the full fixed 5-topic set on the live Lambda Function URL deployment and correlated the results with CloudWatch.
+
+### Commands run
+
+- `uv run test_research.py "Tesla competitive advantages"`
+- `uv run test_research.py "Microsoft cloud revenue growth"`
+- `uv run test_research.py "NVIDIA AI datacenter demand"`
+- `uv run test_research.py "Amazon advertising growth"`
+- `uv run test_research.py "Apple services revenue growth"`
+- `aws logs tail /aws/lambda/alex-researcher --since 15m --region ap-southeast-1 | rg "research_run|research_ingest|mcp:stderr|Error calling tool"`
+
+### What the 5-topic pass proved
+
+All five requests returned:
+
+- HTTP `200 OK`
+- non-empty output
+- `Outcome: success_fallback`
+
+No `success_verified` run was observed in the fresh 5-topic benchmark set.
+
+### Fresh benchmark evidence
+
+#### Tesla competitive advantages
+
+- terminal:
+  - `Outcome: success_fallback`
+  - `Degraded Signal: no web research`
+- CloudWatch:
+  - `browser_run status=max_turns`
+  - `constrained_browser_run status=max_turns`
+  - `browserless_fallback_run status=ok`
+  - `research_ingest success=True`
+  - `request_end ingest_success=None`
+
+#### Microsoft cloud revenue growth
+
+- terminal:
+  - `Outcome: success_fallback`
+  - `Degraded Signal: page not found`
+- CloudWatch:
+  - `browser_run status=ok`
+  - `research_ingest success=True`
+  - `request_end ingest_success=None`
+
+This means the browser run ended cleanly in runtime terms, but still produced degraded content because direct pages were inaccessible/unusable.
+
+#### NVIDIA AI datacenter demand
+
+- terminal:
+  - `Outcome: success_fallback`
+  - `Degraded Signal: page not found`
+- CloudWatch:
+  - `browser_run status=ok`
+  - `request_end ingest_success=None`
+
+The response text also mentioned a tooling/storage issue while trying to capture Reuters content, but no dominant `EROFS` signal appeared in the current structured logs.
+
+#### Amazon advertising growth
+
+- terminal:
+  - `Outcome: success_fallback`
+  - `Degraded Signal: page unavailable`
+- CloudWatch:
+  - `browser_run status=ok`
+  - `request_end ingest_success=None`
+
+#### Apple services revenue growth
+
+- terminal:
+  - `Outcome: success_fallback`
+  - `Degraded Signal: quick high-level note`
+- CloudWatch:
+  - `browser_run status=max_turns`
+  - `constrained_browser_run status=max_turns`
+  - `browserless_fallback_run status=ok`
+  - `research_ingest success=True`
+  - `request_end ingest_success=None`
+
+### Updated diagnosis after Task 4
+
+The strongest current evidence now supports:
+
+- browser/content-access instability as the primary production issue
+- fallback is what makes the system usable
+- browser verification is still not stable enough to call Guide 4 Step 4 fully browser-proven
+
+The evidence does **not** currently support `EROFS` as the dominant root cause.
+
+That older `EROFS` direction should now be treated as:
+
+- historical / possible
+- but not the leading explanation for the current 5-topic benchmark behavior
+
+### Important follow-up finding
+
+Task 4 also exposed a limitation in the newer ingest observability:
+
+- some runs had `research_ingest success=True`
+- but the same `request_end` still logged `ingest_success=None`
+
+So the earlier stronger claim that request-end ingest classification was now effectively solved is no longer accurate.
+
+The honest updated state is:
+
+- tool-level ingest evidence is better
+- request-end ingest classification still has a propagation gap
+
+### Current recommended next task
+
+The next task should still be:
+
+- implement the minimal browser-instability fix based on this updated diagnosis
+
+while noting that a later follow-up should tighten the ingest-observation plumbing so `request_end ingest_success` always reflects the actual tool result when the tool runs.
+
+## Task 5 completed: browser loop pressure reduced and fallback output made more usable
+
+After the user asked to continue directly into `Task 5`, I implemented a minimal fix aimed at the current real failure pattern rather than the older `EROFS` theory.
+
+### Files edited
+
+- `backend/researcher/context.py`
+- `backend/researcher/server.py`
+- `backend/researcher/test_research.py`
+- `backend/researcher/BUG_AND_FIX.md`
+- `backend/researcher/OBSERVABILITY_AND_BENCHMARK_SPEC.md`
+- `backend/researcher/session_handoff.md`
+- `backend/researcher/README.md`
+- `docs/superpowers/plans/2026-07-05-researcher-observability-stability-benchmark.md`
+
+### What changed
+
+In prompts and query builders:
+
+- if both allowed direct-article attempts fail, the agent must:
+  - stop browsing
+  - produce a short fallback note from general market knowledge
+  - ingest it immediately
+  - not ask the user for another link/source/retry choice
+
+In runtime behavior:
+
+- reduced browser turn limits for topic-driven runs:
+  - browser run: `15 -> 10`
+  - constrained browser run: `12 -> 8`
+
+In classification:
+
+- expanded terminal and server fallback markers for newer phrasing like:
+  - `quick high-level fallback`
+  - `web sources blocked`
+  - `no clean direct article found`
+  - `browsing blocked`
+
+### Deployment status
+
+Important positive change:
+
+- `uv run deploy.py` succeeded end-to-end during this Task 5 pass
+
+So unlike several earlier passes:
+
+- Docker build worked
+- ECR push worked
+- Terraform apply worked
+- Lambda update completed through the normal repo deployment path
+
+### 5-topic verification after the main behavior fix
+
+I reran:
+
+- `Tesla competitive advantages`
+- `Microsoft cloud revenue growth`
+- `NVIDIA AI datacenter demand`
+- `Amazon advertising growth`
+- `Apple services revenue growth`
+
+### What improved
+
+Compared with Task 4:
+
+- no more “please give me another link/source” degraded outputs in the 5-topic rerun
+- outputs became more usable fallback notes
+- CloudWatch for the first 5-topic rerun showed:
+  - `browser_run status=ok` for all five topics
+- no repeated `browser_run max_turns -> constrained_browser_run max_turns` chain appeared in that immediate rerun
+
+Representative latency improvements:
+
+- `Tesla`: about `104s` -> about `37s`
+- `Microsoft`: about `54s` -> about `11s`
+- `Apple`: about `112s` -> about `64s` in the immediate rerun, then about `18s` on a later representative rerun
+
+### What did not fully resolve
+
+Task 5 did **not** make the system fully browser-verified.
+
+Remaining truth:
+
+- fallback is still common
+- `request_end ingest_success` still sometimes logs `None` despite `research_ingest success=True`
+- fallback classification needed another marker update after the first rerun because phrasing changed
+
+### Current state after Task 5
+
+The honest post-Task-5 state is:
+
+- the system is more usable than before
+- browser loops are less dominant
+- fallback output quality improved
+- full proof of stable browser-based `success_verified` still does not exist
+- the next likely work item is either:
+  - tighten request-end ingest propagation, or
+  - define/implement a stricter server-side quality gate for true `success_verified`

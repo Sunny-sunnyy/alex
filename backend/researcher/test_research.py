@@ -20,16 +20,29 @@ import requests
 TERRAFORM_DIR = "terraform/4_researcher"
 
 
+# Hàm này là classifier "nhẹ" ở phía client terminal.
+# Nó không nhìn vào CloudWatch, chỉ suy luận từ response text để báo nhanh run này verified hay fallback.
 def classify_terminal_result(result_text: str) -> tuple[str, str | None]:
     """Classify the terminal-visible result without changing the API contract."""
     lowered = result_text.lower()
 
     fallback_markers = [
         "quick high-level note",
+        "quick high-level fallback note",
         "no web research",
+        "web research failed",
+        "web research blocked",
+        "web sources blocked",
         "non-web-browsed overview",
+        "fallback note",
+        "general market knowledge",
         "could not verify",
         "failed to access a clean direct article page",
+        "no clean direct article found",
+        "direct article pages were not accessible",
+        "direct article pages are blocked or unusable",
+        "couldn’t access clean direct articles",
+        "couldn't access clean direct articles",
         "page not found (404)",
         "page not found",
         "page unavailable",
@@ -40,8 +53,10 @@ def classify_terminal_result(result_text: str) -> tuple[str, str | None]:
         "access restricted",
         "access temporarily restricted",
         "access-restricted",
+        "browsing blocked",
         "clean, accessible article content",
         "usable direct article page",
+        "non-article/portal layouts",
         "unable to verify clean direct article pages",
         "couldn’t reliably quote",
         "couldn't reliably quote",

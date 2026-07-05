@@ -204,8 +204,103 @@ CloudWatch đã cho thấy chuỗi khớp nhau:
 
 Kết luận:
 
-- `ingest_success=True` ở `request_end` giờ đã có thể được xem là server-side evidence mạnh hơn trước
-- `Task 2` đã đạt mục tiêu "make ingest outcome explicit enough to classify failures" mà không đổi API contract
+- tool-level ingest evidence tốt hơn trước
+- nhưng benchmark 5-topic sau đó đã cho thấy `request_end ingest_success` vẫn có thể là `None` dù cùng run có `research_ingest success=True`
+
+Vì vậy trạng thái chính xác hiện tại là:
+
+- `research_ingest` là evidence mạnh
+- `request_end ingest_success` đã được cải thiện nhưng **chưa hoàn toàn đáng tin trong mọi run**
+- vẫn còn một gap cần follow-up trong cách request-final summary đọc lại ingest observation
+
+## Benchmark evidence update - 2026-07-05
+
+Trong benchmark 5 topic cố định:
+
+- `Tesla competitive advantages`
+- `Microsoft cloud revenue growth`
+- `NVIDIA AI datacenter demand`
+- `Amazon advertising growth`
+- `Apple services revenue growth`
+
+kết quả mới nhất là:
+
+- 5/5 trả về `200 OK`
+- 5/5 bị phân loại `success_fallback`
+- 0/5 chứng minh được `success_verified`
+
+CloudWatch pattern quan trọng:
+
+- `Tesla` và `Apple`:
+  - `browser_run max_turns`
+  - `constrained_browser_run max_turns`
+  - `browserless_fallback_run ok`
+- `Microsoft`, `NVIDIA`, `Amazon`:
+  - `browser_run ok`
+  - nhưng output vẫn degraded vì direct article pages không usable
+
+Điều này làm rõ rằng:
+
+- browser instability hiện tại không chỉ là `MaxTurnsExceeded`
+- còn có một nhóm run "browser technically completed but content quality still unusable"
+
+Kết luận benchmark-level hiện tại:
+
+- browser/content-access instability là root-cause direction mạnh nhất
+- `EROFS` hiện chưa có evidence mới đủ mạnh để giữ làm giả thuyết chính
+
+## Task 5 update - 2026-07-05
+
+Trong pass `Task 5`, hướng fix được đổi sang:
+
+- giảm browser loop pressure
+- cấm degraded output kiểu đẩy việc ngược lại cho user
+- ưu tiên fallback note usable hơn khi direct article pages không sạch
+
+### Thay đổi chính
+
+- prompt/query builder giờ bắt agent:
+  - nếu 2 direct-article attempts đều fail
+  - thì dừng browse
+  - viết fallback note ngắn
+  - ingest ngay
+  - không yêu cầu user đưa link/source khác
+
+- browser turn limits cho topic-driven run được siết:
+  - `browser_run`: `15 -> 10`
+  - `constrained_browser_run`: `12 -> 8`
+
+### Kết quả quan sát được
+
+Trong lần rerun 5 topic đầu tiên sau fix:
+
+- CloudWatch cho thấy `browser_run status=ok` ở cả 5 topic benchmark
+- không còn chain `browser_run max_turns` + `constrained_browser_run max_turns` trong sample đó
+- output degraded kiểu “hãy đưa tôi link khác” biến mất
+- nhiều case chuyển sang fallback note usable hơn
+
+### Ghi chú quan trọng về classification
+
+Task 5 tạo phrasing fallback mới như:
+
+- `quick high-level fallback`
+- `web sources blocked`
+- `no clean direct article found`
+
+nên heuristic cũ lại sinh false-positive ở vài run.
+
+Việc này đã được vá tiếp trong:
+
+- `server.py`
+- `test_research.py`
+
+và redeploy lại.
+
+### Trạng thái đúng sau Task 5
+
+- Task 5 là một cải thiện stability có ý nghĩa
+- nhưng chưa phải bằng chứng rằng browser-verifiable success đã ổn định
+- fallback vẫn là đường cứu chính của hệ thống
 
 ## 2. Terminal-friendly output
 

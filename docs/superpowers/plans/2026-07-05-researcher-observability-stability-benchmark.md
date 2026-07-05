@@ -176,9 +176,90 @@ Observed result for Task 2:
 
 Conclusion after Task 2:
 
-- ingest outcome is now explicit enough for server-side failure classification
-- `request_end ingest_success` is no longer only a heuristic when the tool actually ran
-- plan can move to `Task 4` or return to any remaining observability gaps with a stronger evidence base
+- ingest outcome is more explicit at the tool layer
+- but `Task 4` later showed `request_end ingest_success` can still be `None` even when `research_ingest success=True`
+- so Task 2 improved evidence, but did not fully solve request-end ingest classification
+
+Task 4 execution update:
+
+- ran the fixed 5-topic set on deployed Lambda:
+  - `Tesla competitive advantages`
+  - `Microsoft cloud revenue growth`
+  - `NVIDIA AI datacenter demand`
+  - `Amazon advertising growth`
+  - `Apple services revenue growth`
+- correlated terminal output with CloudWatch using `run_id`
+- updated the working diagnosis based on fresh production evidence
+
+Observed outcome for Task 4:
+
+- all 5 runs returned `200 OK`
+- all 5 runs printed `Outcome: success_fallback`
+- no `success_verified` run appeared
+
+Observed phase patterns:
+
+- `Tesla` and `Apple`:
+  - `browser_run max_turns`
+  - `constrained_browser_run max_turns`
+  - `browserless_fallback_run ok`
+- `Microsoft`, `NVIDIA`, `Amazon`:
+  - `browser_run ok`
+  - but content was still degraded due blocked/unusable direct article pages
+
+Important new finding:
+
+- some runs logged:
+  - `research_ingest success=True`
+- but the same run still ended with:
+  - `request_end ingest_success=None`
+
+Conclusion after Task 4:
+
+- the main root-cause direction is now best described as `browser/content-access instability`
+- current evidence does not support `EROFS` as the dominant explanation for the latest 5-topic benchmark set
+- fallback is still what makes the system usable
+- the next fix should target browser instability first
+
+Task 5 execution update:
+
+- changed prompt/query behavior so blocked direct-article attempts no longer end by asking the user for another link/source
+- reduced topic-driven browser turn limits:
+  - browser: `15 -> 10`
+  - constrained browser: `12 -> 8`
+- expanded fallback markers in both:
+  - `backend/researcher/server.py`
+  - `backend/researcher/test_research.py`
+
+Deployment update:
+
+- `uv run deploy.py` succeeded during Task 5
+- unlike several earlier passes, this fix was deployed through the normal repo path rather than a manual Lambda image update
+
+Observed result after the first 5-topic rerun:
+
+- all five requests still returned `200 OK`
+- degraded outputs became more usable fallback notes
+- the “give me another link/source” pattern disappeared from the rerun sample
+- CloudWatch showed `browser_run status=ok` for all five rerun topics
+
+Measured improvement examples:
+
+- `Tesla`: about `104s` -> about `37s`
+- `Microsoft`: about `54s` -> about `11s`
+- `Apple`: about `112s` -> about `64s` in the immediate rerun
+
+Residual issues after Task 5:
+
+- fallback is still common
+- request-end ingest propagation still sometimes logs `ingest_success=None`
+- marker drift had to be patched again because fallback phrasing changed
+
+Conclusion after Task 5:
+
+- this is a real stability improvement
+- it reduces loop-heavy behavior and improves degraded output quality
+- it still does not prove stable browser-based `success_verified`
 
 ## Global Constraints
 
@@ -628,13 +709,13 @@ Expected:
 ```md
 | Topic | Model | Outcome | Degraded Signal | Failing Phase | Evidence |
 |-------|-------|---------|-----------------|--------------|----------|
-| Tesla competitive advantages | openai/gpt-5.4-nano | success_fallback | read_only_filesystem | browser_run | CloudWatch + terminal |
+| Tesla competitive advantages | openai/gpt-5.4-nano | success_fallback | no_web_research | browser_run + constrained_browser_run | CloudWatch + terminal |
 ```
 
 - [ ] **Step 4: State a single root-cause hypothesis based on the evidence**
 
 ```md
-Hypothesis: `browser_snapshot` in Lambda is intermittently attempting a write on a non-writable path, which causes degraded browser runs and pushes the agent into fallback or placeholder output.
+Hypothesis: direct-article browsing in the current Lambda runtime is still unstable because allowed sources frequently return blocked, unusable, or loop-inducing pages; this pushes some runs into degraded browser output and others into repeated `MaxTurnsExceeded` fallback.
 ```
 
 - [ ] **Step 5: Commit the evidence-only update before implementing a fix**
@@ -655,37 +736,33 @@ git commit -m "docs: record researcher instability evidence before fix"
 - Consumes:
   - Verified instability hypothesis from Task 4
 - Produces:
-  - A narrower, evidence-driven mitigation for the browser/file-system failure mode
+  - A narrower, evidence-driven mitigation for the browser/content-access instability mode
 
 - [ ] **Step 1: Write down the exact failure to target before changing code**
 
 ```md
-Target failure to fix: browser-related degraded runs caused by write attempts outside `/tmp`, resulting in `EROFS` / read-only filesystem errors and placeholder output.
+Target failure to fix: browser-related degraded runs caused by blocked/unusable direct article pages and repeated browser loops, resulting in degraded content or browserless fallback output.
 ```
 
-- [ ] **Step 2: Apply the smallest config/code change that forces all writable browser artifacts into `/tmp`**
+- [ ] **Step 2: Apply the smallest config/prompt/runtime change that narrows browser failure paths**
 
 ```python
-params = {
-    "command": "playwright-mcp",
-    "args": args,
-    "env": {
-        "DEBUG": "pw:api,pw:browser*",
-        "HOME": "/tmp",
-        "TMPDIR": "/tmp",
-        "XDG_CACHE_HOME": "/tmp/.cache",
-    },
-}
+# Example direction only — final fix must match the proven failure pattern.
+# Possible minimal fixes:
+# - make query builder more explicit about article URL acceptance/rejection
+# - stop after one blocked source instead of allowing a second loop
+# - tighten browser fallback thresholds before second max-turn burn
+# - bias browser path toward direct, source-specific URLs only
 ```
 
-- [ ] **Step 3: If needed, add a guard log proving the writable paths being used**
+- [ ] **Step 3: If needed, add one guard log proving the narrowed decision path**
 
 ```python
 logger.info(
-    "Playwright writable env HOME=%s TMPDIR=%s XDG_CACHE_HOME=%s",
-    params["env"].get("HOME"),
-    params["env"].get("TMPDIR"),
-    params["env"].get("XDG_CACHE_HOME"),
+    "research_run browser_fix run_id=%s source=%s decision=%s",
+    trace_state.run_id,
+    chosen_source,
+    decision,
 )
 ```
 
@@ -708,8 +785,8 @@ Expected:
 
 ```md
 Result after fix:
-- `EROFS` no longer appears in browser-related degraded runs
-- placeholder rate dropped from X/5 to Y/5
+- `success_verified` appears in at least some runs, or
+- fallback rate drops from X/5 to Y/5
 - remaining failures are now concentrated in ...
 ```
 

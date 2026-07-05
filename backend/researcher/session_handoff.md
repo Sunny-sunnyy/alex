@@ -514,3 +514,119 @@ Verified example:
 - `request_end outcome=success_fallback ingest_success=True degraded_reason=page_unavailable total_duration_ms=76694`
 
 This confirms the first Task 1 observability slice is working end-to-end.
+
+## Task 2 completed: ingest outcome is now explicit enough to classify failures
+
+After the user asked to continue with `Task 2` before `Task 4`, I implemented a minimal server-side ingest telemetry pass without changing the `/research` API contract.
+
+### Files edited
+
+- `backend/researcher/tools.py`
+- `backend/researcher/server.py`
+- `backend/researcher/OBSERVABILITY_AND_BENCHMARK_SPEC.md`
+- `docs/superpowers/plans/2026-07-05-researcher-observability-stability-benchmark.md`
+- `backend/researcher/session_handoff.md`
+
+### What changed
+
+In `tools.py`:
+
+- added request-scoped ingest observation storage using `ContextVar`
+- added helpers:
+  - `set_ingest_run_id()`
+  - `reset_ingest_observation()`
+  - `get_last_ingest_observation()`
+- added tool-level structured CloudWatch log line:
+  - `research_ingest`
+- each ingest attempt now logs:
+  - `run_id`
+  - `success`
+  - `topic`
+  - `document_id`
+  - `error`
+
+In `server.py`:
+
+- wired the request `run_id` into the ingest tool telemetry context
+- reset ingest observation at the start of each `/research` request
+- added `_resolve_ingest_success(response_text)`
+- `request_end ingest_success` now prefers tool-level observation over response-text heuristics
+- still falls back to text heuristic only when no ingest observation exists
+
+### Why this was needed
+
+Before this pass:
+
+- `request_end ingest_success` was inferred mainly from final response text
+- if the agent did not mention ingest explicitly, server-side classification stayed weaker than necessary
+
+After this pass:
+
+- ingest success/failure is visible directly from the tool layer
+- the same `run_id` now ties together:
+  - request phases
+  - ingest result
+  - final request summary
+
+### Verification performed
+
+Local validation:
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run python -m py_compile server.py tools.py`
+
+Deploy attempt:
+
+- `uv run deploy.py`
+
+What happened:
+
+- Docker build succeeded
+- ECR push succeeded
+- image tag pushed:
+  - `deploy-1783260341`
+- Terraform apply failed again with:
+  - `Plugin did not respond`
+
+Because of the repeated Terraform provider failure, I used the already-proven manual deployment path:
+
+- `aws lambda update-function-code --function-name alex-researcher --image-uri 487592470523.dkr.ecr.ap-southeast-1.amazonaws.com/alex-researcher:deploy-1783260341 --region ap-southeast-1`
+
+Then verified Lambda reached:
+
+- `LastUpdateStatus=Successful`
+- `State=Active`
+
+### End-to-end verification run
+
+Command:
+
+- `uv run test_research.py "Tesla competitive advantages"`
+
+Observed terminal result:
+
+- HTTP `200 OK`
+- `Model: openai/gpt-5.4-nano`
+- `Outcome: success_fallback`
+- `Degraded Signal: page unavailable`
+
+CloudWatch evidence:
+
+- `research_run phase_start run_id=5b463b99-e175-41f1-9191-fb3650c606c5 ...`
+- `research_ingest run_id=5b463b99-e175-41f1-9191-fb3650c606c5 success=True topic=Tesla competitive advantages Analysis Jul 05 document_id=1dd66a7f-6f56-469e-bd43-8a84dcd6121b error=None`
+- `research_run request_end run_id=5b463b99-e175-41f1-9191-fb3650c606c5 model=openai/gpt-5.4-nano topic=Tesla competitive advantages outcome=success_fallback ingest_success=True degraded_reason=page_unavailable total_duration_ms=61137`
+
+### What this proves
+
+- the deployed Lambda is now emitting exact ingest telemetry, not only request-level phase telemetry
+- `request_end ingest_success=True` matched a real tool-level ingest success event with the same `run_id`
+- browser degradation and ingest success can now be distinguished more cleanly in server-side evidence
+
+### Current status after Task 2
+
+- `Task 1` slice remains valid
+- `Task 2` is complete
+- service is still:
+  - usable
+  - fallback-heavy
+  - not yet proven stable for browser-based `success_verified`
+- the next rational step is still to gather the fixed 5-topic evidence set and move into `Task 4`

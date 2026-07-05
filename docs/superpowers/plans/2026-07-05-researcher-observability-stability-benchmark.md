@@ -142,6 +142,44 @@ Observed result:
   - `request_end`
 - `request_end total_duration_ms` was corrected to match the outer request duration rather than double-count nested phases
 
+Task 2 execution update:
+
+- added request-scoped ingest telemetry in `backend/researcher/tools.py`
+- added tool-level structured log event:
+  - `research_ingest`
+- `server.py` now resolves `ingest_success` by preferring tool-level observation over response-text heuristics
+- API contract for `/research` remains unchanged
+
+Deployment/verification notes for Task 2:
+
+- `uv run deploy.py` successfully built and pushed image tag `deploy-1783260341`
+- Terraform apply failed again with:
+  - `Plugin did not respond`
+- manual deployment path was used to finish verification:
+  - `aws lambda update-function-code --function-name alex-researcher --image-uri 487592470523.dkr.ecr.ap-southeast-1.amazonaws.com/alex-researcher:deploy-1783260341 --region ap-southeast-1`
+
+Verification commands:
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run python -m py_compile server.py tools.py`
+- `uv run backend/researcher/test_research.py "Tesla competitive advantages"`
+- `aws logs tail /aws/lambda/alex-researcher --since 2m --region ap-southeast-1 | rg "research_run|research_ingest"`
+
+Observed result for Task 2:
+
+- deployed request returned `200 OK`
+- terminal summary still classified the run as:
+  - `Outcome: success_fallback`
+  - `Degraded Signal: page unavailable`
+- CloudWatch now showed exact ingest evidence tied to the same request:
+  - `research_ingest run_id=5b463b99-e175-41f1-9191-fb3650c606c5 success=True ... document_id=1dd66a7f-6f56-469e-bd43-8a84dcd6121b`
+  - `research_run request_end run_id=5b463b99-e175-41f1-9191-fb3650c606c5 ... ingest_success=True degraded_reason=page_unavailable ...`
+
+Conclusion after Task 2:
+
+- ingest outcome is now explicit enough for server-side failure classification
+- `request_end ingest_success` is no longer only a heuristic when the tool actually ran
+- plan can move to `Task 4` or return to any remaining observability gaps with a stronger evidence base
+
 ## Global Constraints
 
 - Fix bug instability before benchmarking models.

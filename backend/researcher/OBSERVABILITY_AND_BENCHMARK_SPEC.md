@@ -141,6 +141,7 @@ Hiện đã có các event:
 - `phase_start`
 - `phase_end`
 - `request_end`
+- `research_ingest`
 
 với các field chính:
 
@@ -153,6 +154,8 @@ với các field chính:
 - `outcome`
 - `ingest_success`
 - `degraded_reason`
+- `document_id`
+- `error`
 
 Đã verify bằng CloudWatch rằng một run thực tế có cùng `run_id` xuyên suốt từ:
 
@@ -164,6 +167,45 @@ Ghi chú:
 
 - `total_duration_ms` đã được sửa để dùng duration của `request_start`
 - tránh double-count nested phase durations
+
+### Trạng thái hiện tại của ingest observability
+
+Trong pass `Task 2`, ingest outcome không còn chỉ phụ thuộc vào response-text heuristic.
+
+Hiện runtime đã có thêm:
+
+- tool-level structured log `research_ingest`
+- cùng `run_id` với `research_run`
+- kết quả ingest cuối được giữ lại trong request context để `request_end ingest_success=...` ưu tiên dùng dữ liệu thật từ tool nếu có
+
+Điều này quan trọng vì trước đó:
+
+- `request_end ingest_success` chủ yếu suy luận từ final response text
+- nếu agent không nhắc rõ ingest trong output thì classification có thể thiếu chắc chắn
+
+Sau pass này:
+
+- `tools.py` log trực tiếp:
+  - `run_id`
+  - `success`
+  - `topic`
+  - `document_id`
+  - `error`
+- `server.py` chỉ fallback về text heuristic khi request không có ingest observation thực sự
+
+Verification trên deployed Lambda ngày `2026-07-05` với topic:
+
+- `Tesla competitive advantages`
+
+CloudWatch đã cho thấy chuỗi khớp nhau:
+
+- `research_ingest run_id=... success=True ... document_id=...`
+- `research_run request_end run_id=... outcome=success_fallback ingest_success=True degraded_reason=page_unavailable ...`
+
+Kết luận:
+
+- `ingest_success=True` ở `request_end` giờ đã có thể được xem là server-side evidence mạnh hơn trước
+- `Task 2` đã đạt mục tiêu "make ingest outcome explicit enough to classify failures" mà không đổi API contract
 
 ## 2. Terminal-friendly output
 

@@ -1,56 +1,110 @@
-# `backend/researcher` - Mã nguồn Researcher Service cho Part 4
+# `backend/researcher` - Mã nguồn Researcher Service của Part 4
 
-Thư mục này chứa toàn bộ **application code** của thành phần **Researcher** trong dự án Alex.
+Thư mục này chứa toàn bộ **application code** cho thành phần **Researcher** trong dự án Alex.
 
-Researcher là một AI service chuyên:
+Researcher là một service AI độc lập có nhiệm vụ:
 
 - nhận yêu cầu nghiên cứu một chủ đề đầu tư;
-- dùng OpenAI Agents SDK để điều phối agent;
-- dùng Playwright MCP để duyệt web khi cần;
-- tạo ghi chú/phân tích tài chính ngắn;
-- gọi ingest pipeline của Part 3 để lưu kết quả vào knowledge base.
-
-Nói ngắn gọn:
-
-- `backend/researcher` là **logic chạy thật** của Researcher;
-- `terraform/4_researcher` là **hạ tầng AWS** để deploy logic đó.
-
-## Thành phần này làm gì?
-
-Researcher là service nghiên cứu độc lập, không phải orchestrator của Part 6.
-
-Nhiệm vụ chính:
-
-1. nhận `topic` từ request hoặc tự chọn chủ đề;
-2. duyệt web để lấy thông tin thị trường nếu browser hoạt động ổn;
-3. tóm tắt thành ghi chú đầu tư ngắn;
-4. lưu ghi chú đó vào knowledge base qua ingest API;
-5. trả kết quả cho caller.
+- cố gắng duyệt web bằng Playwright MCP để tìm nguồn phù hợp;
+- tạo ghi chú phân tích ngắn;
+- gọi ingest pipeline của Part 3 để lưu kết quả vào knowledge base;
+- trả kết quả về cho caller.
 
 Trong implementation hiện tại của repo:
 
-- Researcher chạy dưới dạng **FastAPI app**
+- Researcher chạy bằng **FastAPI**
 - được đóng gói thành **Docker image**
 - deploy lên **AWS Lambda container image**
 - public qua **Lambda Function URL**
 
-Điều này quan trọng vì một số guide cũ vẫn mô tả App Runner, nhưng code hiện tại của repo đã đi theo hướng Lambda Function URL.
+Điều này quan trọng vì một số tài liệu cũ vẫn mô tả App Runner, nhưng source of truth hiện tại là Lambda Function URL.
 
-## Các file trong thư mục
+## Vai trò của folder này trong toàn hệ thống
 
-### File runtime chính
+Nói ngắn gọn:
+
+- `backend/researcher` là **logic chạy thật**
+- `terraform/4_researcher` là **hạ tầng AWS** để chạy logic đó
+- `backend/ingest` là **điểm lưu kết quả research** vào vector knowledge base
+
+Luồng liên kết với các phần trước:
+
+1. **Part 2** cung cấp embedding foundation qua SageMaker
+2. **Part 3** cung cấp ingest API và vector storage
+3. **Part 4** dùng Researcher để tạo nội dung mới rồi gửi sang ingest API của Part 3
+
+## Luồng hoạt động chính
+
+Luồng runtime cơ bản:
+
+1. Client gọi `POST /research` vào Researcher
+2. `server.py` nhận request và dựng query
+3. `server.py` tạo agent từ:
+   - prompt trong `context.py`
+   - browser MCP trong `mcp_servers.py`
+   - ingest tool trong `tools.py`
+4. Agent thử browser path trước
+5. Nếu browser path không ổn, runtime có thể đi sang:
+   - constrained browser fallback
+   - browserless fallback
+6. Khi có note cuối, agent gọi `ingest_financial_document()`
+7. `tools.py` gửi payload sang ingest API của Part 3
+8. Kết quả được lưu vào knowledge base
+9. Researcher trả response text cho caller
+
+## Luồng deploy
+
+1. `deploy.py` lấy AWS account/region
+2. `deploy.py` build Docker image từ `Dockerfile`
+3. `deploy.py` push image lên ECR
+4. `deploy.py` ghi image URI vào `terraform/4_researcher/researcher.auto.tfvars.json`
+5. `terraform/4_researcher` dùng image đó để deploy/update Lambda
+
+Trong các phiên debug gần đây, do Terraform provider có lúc lỗi, team đã nhiều lần dùng đường deploy thủ công:
+
+1. build image local
+2. push ECR
+3. `aws lambda update-function-code --image-uri ...`
+
+## Trạng thái thực tế hiện tại
+
+Hiện tại Researcher đã:
+
+- trả `200 OK` ổn định hơn ở Step 4 theo nghĩa thực dụng;
+- ingest được kết quả;
+- có terminal summary trong `test_research.py`;
+- có slice observability đầu tiên trong `server.py`:
+  - `run_id`
+  - `phase_start`
+  - `phase_end`
+  - `request_end`
+- có ingest telemetry rõ hơn ở `tools.py`:
+  - `research_ingest`
+  - `document_id`
+  - `success/error`
+
+Nhưng vẫn còn hạn chế:
+
+- browser path trong Lambda vẫn không ổn định hoàn toàn;
+- nhiều request vẫn thành công nhờ fallback;
+- chưa chứng minh được `success_verified` ổn định trên production runtime hiện tại.
+
+## Các file trong folder
+
+### Runtime chính
 
 #### `server.py`
 
-Đây là file quan trọng nhất của thư mục.
+Đây là file quan trọng nhất trong folder.
 
 Nhiệm vụ:
 
 - khởi tạo FastAPI app;
-- đọc cấu hình môi trường;
+- nhận request HTTP;
 - dựng model runtime;
 - chạy Researcher agent;
-- xử lý fallback khi browser/MCP gặp lỗi;
+- xử lý fallback browser/constrained/browserless;
+- ghi structured observability logs;
 - expose các endpoint:
   - `/`
   - `/health`
@@ -58,41 +112,44 @@ Nhiệm vụ:
   - `/research/auto`
   - `/test-bedrock`
 
-Đây là nơi chứa luồng nghiệp vụ chính của Researcher.
+Đây là nơi chứa nghiệp vụ trung tâm của Researcher.
 
-### File prompt / instruction
+### Prompt và instruction
 
 #### `context.py`
 
-File này chứa prompt và instruction cho agent.
+File này chứa prompt và instruction của agent.
 
 Nhiệm vụ:
 
-- định nghĩa cách agent phải browse, analyze, và save;
-- giới hạn số trang browse;
+- quy định agent browse như thế nào;
+- giới hạn số trang;
 - ưu tiên nguồn nào;
-- tạo prompt mặc định khi người dùng không truyền topic.
+- xác định prompt mặc định khi không có topic.
 
-Nếu muốn tinh chỉnh hành vi research, đây là một trong những file đầu tiên cần đọc.
+Hiện tại source preference được định hướng theo:
 
-### File tool
+- `Investopedia`
+- `AP News`
+- `CNN Business`
+- `Reuters` chỉ là nguồn phụ nếu direct article page load sạch
+
+### Tool kết nối ingest
 
 #### `tools.py`
 
-File này định nghĩa tool mà agent dùng để lưu kết quả research.
+Đây là cầu nối giữa Researcher và Part 3.
 
 Nhiệm vụ:
 
 - nhận `topic` và `analysis` từ agent;
-- đóng gói thành payload ingest;
-- gọi API Gateway ingest của Part 3;
-- retry nếu gặp lỗi tạm thời.
+- đóng gói document;
+- gọi ingest API;
+- retry khi gặp lỗi tạm thời.
 
-Nói cách khác:
+File này liên kết trực tiếp với `backend/ingest` ở mức API.
 
-- `tools.py` là điểm nối giữa Researcher và `backend/ingest`.
-
-### File MCP / browser
+### Browser / MCP
 
 #### `mcp_servers.py`
 
@@ -100,104 +157,113 @@ File này tạo và cấu hình Playwright MCP server.
 
 Nhiệm vụ:
 
-- tạo MCPServerStdio cho Playwright;
-- cấu hình browser args phù hợp môi trường headless/container;
-- chọn chrome binary;
-- ghi config tạm ra `/tmp`;
-- hỗ trợ logging stderr của MCP subprocess khi debug.
+- chọn browser binary;
+- cấu hình launch args cho headless/container;
+- ghi config tạm vào `/tmp`;
+- hỗ trợ log stderr của MCP subprocess khi debug.
 
-Đây là file rất quan trọng khi Researcher gặp lỗi liên quan đến browser, captcha, redirect, hoặc filesystem.
+Đây là file rất quan trọng khi gặp:
 
-### File deploy
+- captcha
+- redirect
+- interstitial
+- tracker noise
+- lỗi browser trong Lambda
+
+### Deploy
 
 #### `deploy.py`
 
-Đây là script deploy chính cho Researcher.
+Script deploy chính của Researcher.
 
 Nhiệm vụ:
 
-- lấy account/region;
-- bảo đảm ECR repo đã có;
-- build Docker image;
-- push image lên ECR;
-- ghi image URI vào `terraform/4_researcher/researcher.auto.tfvars.json`;
-- chạy `terraform apply`;
+- lấy AWS account/region;
+- bảo đảm ECR tồn tại;
+- login ECR;
+- build image;
+- push image;
+- cập nhật `researcher.auto.tfvars.json`;
+- chạy Terraform apply;
 - chờ Lambda active;
-- in ra service URL sau deploy.
+- in ra service URL.
 
-Đây là file phản ánh rõ nhất cách deployment thực tế hiện nay đang hoạt động.
-
-### File test
+### Test
 
 #### `test_research.py`
 
-Script test end-to-end cho service đã deploy.
+Script test end-to-end trên service đã deploy.
 
 Nhiệm vụ:
 
 - lấy `researcher_url` từ Terraform output;
 - gọi `/health`;
 - gọi `/research`;
-- in kết quả research;
-- nhắc người dùng kiểm tra knowledge base bằng `backend/ingest/test_search_s3vectors.py`.
+- in `RUN SUMMARY`;
+- phân loại terminal outcome:
+  - `success_verified`
+  - `success_fallback`
+- in nội dung research cuối;
+- nhắc kiểm tra ingest bên `backend/ingest/test_search_s3vectors.py`.
 
-Đây là script phù hợp nhất để test Step 4 của Guide 4.
+Đây là script phù hợp nhất để test Step 4 hiện tại.
 
 #### `test_local.py`
 
-Script test agent ở local.
+Script test Researcher local.
 
 Nhiệm vụ:
 
-- chạy Researcher mà không cần gọi Lambda URL;
-- dùng MCP local;
-- in final output ra console.
+- chạy agent local;
+- tạo MCP local;
+- in final output.
 
-Script này hữu ích để test nhanh prompt hoặc tool behavior trước khi deploy.
+Script này phù hợp để test nhanh trước khi deploy.
 
-### File build local
+### Build local
 
 #### `build_local.sh`
 
-Script shell chạy Researcher container ở local.
+Script shell để build và chạy container Researcher local.
 
 Nhiệm vụ:
 
-- đọc `.env` từ root repo;
+- đọc `.env` từ repo root;
 - build image local;
 - chạy container local trên cổng `8000`.
 
-Nó giúp kiểm tra môi trường container gần với production hơn so với chạy `uvicorn` trực tiếp.
+Nó giúp mô phỏng môi trường container gần production hơn so với chạy `uvicorn` thuần.
 
-### File container
+### Container
 
 #### `Dockerfile`
 
-File build image cho Researcher.
+File build image của Researcher.
 
 Nhiệm vụ:
 
 - cài Node.js;
-- cài Playwright MCP;
-- cài Chromium và dependency Linux;
-- cài dependency Python bằng `uv`;
+- cài `@playwright/mcp`;
+- cài Chromium;
+- cài Python dependency bằng `uv`;
 - copy code ứng dụng;
 - thêm Lambda Web Adapter;
 - chạy `uvicorn`.
 
-Đây là nền tảng để Lambda có thể chạy FastAPI app như một HTTP service.
+Đây là nền tảng để Lambda chạy FastAPI app như một HTTP service.
 
-### File cấu hình project Python
+### Cấu hình Python project
 
 #### `pyproject.toml`
 
-File định nghĩa đây là một `uv` project độc lập.
+File định nghĩa `backend/researcher` là một `uv` project độc lập.
 
 Nhiệm vụ:
 
 - khai báo Python version;
 - khai báo dependency;
-- làm nguồn cho local development và Docker build.
+- hỗ trợ local development;
+- hỗ trợ Docker build.
 
 #### `uv.lock`
 
@@ -206,198 +272,75 @@ File lock dependency do `uv` sinh ra.
 Nhiệm vụ:
 
 - cố định version package;
-- giúp môi trường local/container ổn định hơn.
+- giúp local/container reproducible hơn.
 
-Thông thường không chỉnh tay file này.
+Thông thường không nên chỉnh tay.
 
-### File môi trường phụ
+### File phụ trợ
 
 #### `.python-version`
 
-Gợi ý version Python cho local environment.
+Gợi ý Python version cho local environment.
 
 #### `.dockerignore`
 
-Giảm bớt file không cần thiết khi build Docker image.
+Giảm file rác đi vào Docker build context.
 
-### File ghi nhận incident
+### Tài liệu nội bộ
 
 #### `BUG_AND_FIX.md`
 
-Đây là file lịch sử debugging và incident notes.
+Ghi lại incident history và root cause đã gặp trong Part 4.
 
-Nhiệm vụ:
+#### `OBSERVABILITY_AND_BENCHMARK_SPEC.md`
 
-- ghi lại các lỗi đã gặp;
-- root cause đã xác minh;
-- các thay đổi đã làm;
-- tình trạng hiện tại;
-- các bước tiếp theo.
+Mô tả hướng quan sát, benchmark và failure taxonomy của Researcher.
 
-Nếu bạn muốn biết vì sao Researcher đã được sửa như hiện nay, hãy đọc file này.
+#### `session_handoff.md`
 
-## Cách các file trong thư mục liên kết với nhau
+Nhật ký handoff giữa các session để không mất context khi mở chat mới.
 
-### Luồng runtime chính
+## Các file liên kết với nhau như thế nào
 
-1. `server.py` nhận request HTTP.
-2. `server.py` lấy prompt từ `context.py`.
-3. `server.py` tạo MCP browser qua `mcp_servers.py` nếu chạy browser mode.
-4. `server.py` tạo agent và gắn tool từ `tools.py`.
-5. Agent tạo nội dung research.
-6. Agent gọi `ingest_financial_document()` trong `tools.py`.
-7. `tools.py` gọi ingest API của Part 3.
-8. Kết quả được lưu vào knowledge base.
+### Quan hệ runtime
 
-### Luồng deploy
+1. `server.py` gọi `context.py` để lấy prompt
+2. `server.py` gọi `mcp_servers.py` để có browser MCP
+3. `server.py` gắn tool từ `tools.py`
+4. Agent chạy và sinh final output
+5. `tools.py` gọi ingest API của Part 3
 
-1. `deploy.py` build image từ `Dockerfile`.
-2. `deploy.py` push image lên ECR.
-3. `deploy.py` ghi image URI cho Terraform.
-4. `terraform/4_researcher` deploy hoặc update Lambda bằng image đó.
+### Quan hệ test
 
-### Luồng test
+1. `test_research.py` lấy URL từ `terraform/4_researcher`
+2. script gọi service đã deploy
+3. terminal summary giúp phân loại nhanh outcome
+4. nếu cần kiểm tra sâu hơn thì xem CloudWatch
 
-#### Test local
+### Quan hệ deploy
 
-1. chạy `uv run test_local.py`
-2. script tạo agent local
-3. script dùng `context.py`, `mcp_servers.py`, `tools.py`
-4. in output ra console
+1. `deploy.py` phụ thuộc vào `Dockerfile`
+2. `deploy.py` phụ thuộc vào `terraform/4_researcher`
+3. `terraform/4_researcher` dùng image URI do `deploy.py` ghi ra
 
-#### Test deployed service
+## Nên đọc file nào trước
 
-1. chạy `uv run test_research.py`
-2. script lấy URL từ `terraform/4_researcher`
-3. gọi `/health`
-4. gọi `/research`
-5. Researcher lưu kết quả vào ingest pipeline
-6. sau đó có thể kiểm tra bằng `backend/ingest/test_search_s3vectors.py`
+Nếu muốn hiểu nhanh folder này, thứ tự nên là:
 
-## Luồng hoạt động end-to-end của Researcher
+1. `README.md`
+2. `server.py`
+3. `context.py`
+4. `tools.py`
+5. `mcp_servers.py`
+6. `test_research.py`
+7. `deploy.py`
+8. `BUG_AND_FIX.md`
+9. `session_handoff.md`
 
-### Luồng research thành công
+Nếu mục tiêu là debug instability hiện tại, thứ tự tốt hơn là:
 
-1. Client gọi `POST /research`
-2. `server.py` xây query từ topic hoặc prompt mặc định
-3. Agent dùng browser nếu có thể
-4. Agent viết ghi chú đầu tư ngắn
-5. Agent gọi `ingest_financial_document`
-6. Tool gọi ingest API
-7. Ingest pipeline tạo embedding và lưu vào vector store
-8. Researcher trả nội dung về cho client
-
-### Luồng fallback
-
-Nếu browser mode không ổn:
-
-1. `server.py` thử prompt constrained hơn
-2. nếu vẫn fail vì `MaxTurnsExceeded`, chuyển sang browserless fallback
-3. vẫn tạo một ghi chú ngắn
-4. vẫn ingest vào knowledge base
-
-Điều này giúp request không bị fail hoàn toàn chỉ vì browser bị loop hoặc captcha.
-
-## Thư mục này liên kết với các phần trước như thế nào?
-
-### Liên kết với `backend/ingest`
-
-Đây là mối liên kết quan trọng nhất.
-
-Researcher **không tự lưu trực tiếp** vào vector store.
-
-Thay vào đó:
-
-- `tools.py` gọi ingest API của Part 3;
-- API đó được phục vụ bởi Lambda ingest;
-- Lambda ingest dùng SageMaker để tạo embedding;
-- rồi lưu vào vector storage.
-
-Nói cách khác:
-
-- `backend/researcher` tạo **nội dung research**
-- `backend/ingest` chịu trách nhiệm **vector hóa và lưu**
-
-### Liên kết với `terraform/3_ingestion`
-
-Researcher cần:
-
-- `ALEX_API_ENDPOINT`
-- `ALEX_API_KEY`
-
-Hai giá trị này đến từ output của `terraform/3_ingestion`.
-
-Nếu Part 3 chưa deploy hoặc cấu hình sai:
-
-- Researcher vẫn có thể tạo text,
-- nhưng bước ingest sẽ không hoạt động đúng.
-
-### Liên kết với `terraform/2_sagemaker`
-
-Researcher không gọi SageMaker trực tiếp.
-
-Nhưng ingest pipeline của Part 3 lại gọi SageMaker endpoint từ Part 2.
-
-Vì vậy theo chuỗi phụ thuộc:
-
-- Researcher -> Ingest -> SageMaker
-
-Nếu endpoint SageMaker hỏng:
-
-- bước ingest của Researcher cũng sẽ hỏng theo.
-
-### Liên kết với `terraform/4_researcher`
-
-`backend/researcher` là code.
-
-`terraform/4_researcher` là hạ tầng để chạy code đó trên AWS.
-
-Quan hệ chính:
-
-- `deploy.py` dùng `terraform/4_researcher` để deploy
-- `test_research.py` dùng Terraform output từ folder đó để lấy URL
-
-## Các biến môi trường mà Researcher cần
-
-Các biến quan trọng gồm:
-
-- `OPENAI_API_KEY`
-- `ALEX_API_ENDPOINT`
-- `ALEX_API_KEY`
-- `RESEARCHER_MODEL`
-- `BEDROCK_REGION`
-- `MCP_LOGGING`
-
-Ý nghĩa:
-
-- `OPENAI_API_KEY`: tracing hoặc runtime OpenAI model
-- `ALEX_API_ENDPOINT`: URL ingest từ Part 3
-- `ALEX_API_KEY`: API key cho ingest endpoint
-- `RESEARCHER_MODEL`: model đang dùng, hiện thường là `openai/gpt-5.4-nano`
-- `BEDROCK_REGION`: giữ lại cho nhánh AWS/Bedrock hoặc cấu hình liên quan
-- `MCP_LOGGING`: bật log chi tiết cho MCP/browser
-
-## Cách hiểu thư mục này theo vai trò
-
-Nếu phải tóm tắt ngắn:
-
-- `server.py` là bộ não điều phối request
-- `context.py` là prompt/policy
-- `mcp_servers.py` là browser layer
-- `tools.py` là cầu nối sang ingest
-- `deploy.py` là đường deploy production
-- `test_research.py` là bài test Step 4
-- `BUG_AND_FIX.md` là lịch sử lỗi và hướng sửa
-
-## Tóm tắt
-
-`backend/researcher` là phần **service logic** của Researcher trong Part 4.
-
-Nó:
-
-- tạo research note;
-- dùng browser khi có thể;
-- fallback khi browser không ổn;
-- lưu kết quả vào knowledge base qua ingest pipeline;
-- và được deploy dưới dạng Lambda container image trong implementation hiện tại của repo.
-
+1. `session_handoff.md`
+2. `BUG_AND_FIX.md`
+3. `server.py`
+4. `test_research.py`
+5. `OBSERVABILITY_AND_BENCHMARK_SPEC.md`

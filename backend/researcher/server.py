@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 # Import from our modules
 from context import get_agent_instructions, DEFAULT_RESEARCH_PROMPT
 from mcp_servers import create_playwright_mcp_server
-from tools import ingest_financial_document
+from tools import (
+    get_last_ingest_observation,
+    ingest_financial_document,
+    reset_ingest_observation,
+    set_ingest_run_id,
+)
 
 # Load environment
 load_dotenv(override=True)
@@ -39,6 +44,8 @@ app = FastAPI(title="Alex Researcher Service")
 MCP_LOGGING_ENABLED = os.getenv("MCP_LOGGING") == "True"
 
 
+# Dataclass này đại diện cho một phase nhỏ trong lifecycle của một request research.
+# Nó lưu mốc bắt đầu, thời lượng, trạng thái cuối, và kiểu lỗi nếu phase đó fail.
 @dataclass
 class PhaseRecord:
     name: str
@@ -48,6 +55,8 @@ class PhaseRecord:
     error_type: str | None = None
 
 
+# Dataclass này gom toàn bộ observability state của một request /research.
+# Nó là "hộp đen" tạm thời để cuối request ghi ra một summary log dễ đọc trong CloudWatch.
 @dataclass
 class RunTrace:
     run_id: str
@@ -139,6 +148,8 @@ def _get_researcher_model_name() -> str:
     return os.environ.get("RESEARCHER_MODEL", "openai/gpt-5.4-nano")
 
 
+# Hàm này dò các dấu hiệu degraded/fallback trực tiếp từ response text cuối.
+# Nó giúp runtime gắn nhãn outcome mà không phải đổi API contract hay sửa output của agent.
 def _detect_degraded_reason(response_text: str) -> str | None:
     lowered = response_text.lower()
     degraded_markers = {
@@ -172,6 +183,8 @@ def _detect_degraded_reason(response_text: str) -> str | None:
     return None
 
 
+# Hàm này suy luận ingest có khả năng thành công hay không từ nội dung final output.
+# Đây mới là inference nhẹ, chưa phải tool-level telemetry chính xác tuyệt đối.
 def _infer_ingest_success(response_text: str) -> bool | None:
     lowered = response_text.lower()
     success_markers = [
@@ -192,6 +205,18 @@ def _infer_ingest_success(response_text: str) -> bool | None:
     return None
 
 
+def _resolve_ingest_success(response_text: str) -> bool | None:
+    """Prefer tool-level ingest telemetry over response-text heuristics when available."""
+    observation = get_last_ingest_observation()
+    if observation is not None:
+        success = observation.get("success")
+        if isinstance(success, bool):
+            return success
+    return _infer_ingest_success(response_text)
+
+
+# Hàm này chuẩn hóa outcome cuối cho một request research.
+# Mục đích là để CloudWatch có cùng taxonomy dù request đi browser path hay fallback path.
 def _classify_outcome(
     *,
     used_browser: bool,
@@ -332,6 +357,8 @@ async def run_research_agent(topic: str = None) -> str:
         topic=topic or "agent_choice",
         model=model_name,
     )
+    reset_ingest_observation()
+    set_ingest_run_id(trace_state.run_id)
 
     if MCP_LOGGING_ENABLED:
         logger.info(
@@ -369,6 +396,7 @@ async def run_research_agent(topic: str = None) -> str:
     _start_phase(trace_state, "request_start")
 
     try:
+        # Browser path chuẩn luôn được thử trước vì đây là flow "đúng lý tưởng" của Researcher.
         _start_phase(trace_state, "browser_run")
         used_browser = True
         try:
@@ -397,6 +425,7 @@ async def run_research_agent(topic: str = None) -> str:
         )
         used_fallback = True
         try:
+            # Nếu browser path đầu thất bại vì loop/max turns, ta siết topic/query để giảm độ nhiễu.
             _start_phase(trace_state, "constrained_browser_run")
             try:
                 response_text = await _run_research_query(
@@ -427,6 +456,7 @@ async def run_research_agent(topic: str = None) -> str:
                 "Browser-based fallback also exceeded max turns; retrying without browser access."
             )
             browserless_query = _build_browserless_fallback_query(topic)
+            # Đây là lưới an toàn cuối cùng để service vẫn trả được kết quả usable thay vì 500.
             _start_phase(trace_state, "browserless_fallback_run")
             response_text = await _run_research_query(
                 browserless_query,
@@ -438,9 +468,10 @@ async def run_research_agent(topic: str = None) -> str:
         except Exception:
             raise
     finally:
+        # Khối finally này luôn cố gắng phát ra request_end summary dù request đi nhánh nào.
         if response_text:
             trace_state.degraded_reason = _detect_degraded_reason(response_text)
-            trace_state.ingest_success = _infer_ingest_success(response_text)
+            trace_state.ingest_success = _resolve_ingest_success(response_text)
             trace_state.outcome = _classify_outcome(
                 used_browser=used_browser,
                 used_fallback=used_fallback,
@@ -459,6 +490,7 @@ async def run_research_agent(topic: str = None) -> str:
             trace_state.degraded_reason,
             total_duration_ms,
         )
+        set_ingest_run_id(None)
 
     return response_text
 

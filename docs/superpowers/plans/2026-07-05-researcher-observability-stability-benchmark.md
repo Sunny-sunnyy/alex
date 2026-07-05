@@ -62,6 +62,28 @@ Observed outcome:
   - browser max-turn fallback
   - no reliable clean-article extraction yet
 
+Additional execution update:
+
+- `backend/researcher/test_research.py` now prints a compact `RUN SUMMARY`
+- the script now surfaces:
+  - active model
+  - topic
+  - request duration
+  - heuristic outcome
+  - degraded signal
+  - assumed ingest status
+
+Verification after this script change:
+
+- `uv run backend/researcher/test_research.py "Tesla competitive advantages"`
+- `uv run backend/researcher/test_research.py "Microsoft cloud revenue growth"`
+
+Observed terminal classification:
+
+- both runs printed `Outcome: success_fallback`
+- degraded signals were visible directly in terminal without opening CloudWatch
+- no `success_verified` run was observed in this verification pass
+
 ## Global Constraints
 
 - Fix bug instability before benchmarking models.

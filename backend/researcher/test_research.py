@@ -11,12 +11,38 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import requests
 
 
 TERRAFORM_DIR = "terraform/4_researcher"
+
+
+def classify_terminal_result(result_text: str) -> tuple[str, str | None]:
+    """Classify the terminal-visible result without changing the API contract."""
+    lowered = result_text.lower()
+
+    fallback_markers = [
+        "quick high-level note",
+        "no web research",
+        "non-web-browsed overview",
+        "could not verify",
+        "failed to access a clean direct article page",
+        "page not found (404)",
+        "page unavailable",
+        "access restricted",
+        "access temporarily restricted",
+        "error”",
+        'error"',
+    ]
+
+    for marker in fallback_markers:
+        if marker in lowered:
+            return "success_fallback", marker
+
+    return "success_verified", None
 
 
 # Hàm này xác định repo root bằng git để script chạy ổn từ nhiều thư mục khác nhau.
@@ -76,6 +102,8 @@ def test_research(topic=None):
         health_url = f"{service_url}/health"
         response = requests.get(health_url, timeout=10)
         response.raise_for_status()
+        health_payload = response.json()
+        active_model = health_payload.get("researcher_model", "unknown")
         print("✅ Service is healthy")
     except requests.exceptions.RequestException as e:
         print(f"❌ Health check failed: {e}")
@@ -90,17 +118,30 @@ def test_research(topic=None):
         research_url = f"{service_url}/research"
         # Only include topic in payload if it's provided
         payload = {"topic": topic} if topic else {}
+        request_started = time.perf_counter()
         response = requests.post(
             research_url,
             json=payload,
             timeout=180  # Give it 3 minutes for research
         )
+        request_duration_ms = int((time.perf_counter() - request_started) * 1000)
         response.raise_for_status()
 
         # Parse and display the result
         result = response.json()
+        outcome, degraded_signal = classify_terminal_result(result)
+        ingest_status = "assumed_success"
 
         print("\n✅ Research generated successfully!")
+        print("\nRUN SUMMARY")
+        print("=" * 60)
+        print(f"Model: {active_model}")
+        print(f"Topic: {display_topic}")
+        print(f"Request Duration (ms): {request_duration_ms}")
+        print(f"Outcome: {outcome}")
+        print(f"Degraded Signal: {degraded_signal or 'none'}")
+        print(f"Ingest Status: {ingest_status}")
+        print("=" * 60)
         print("\n" + "=" * 60)
         print("RESEARCH RESULT:")
         print("=" * 60)

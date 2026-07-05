@@ -299,3 +299,54 @@ The current honest state is:
 - useful notes are still being produced and ingested
 - the service is still relying heavily on fallback/degraded paths for stability
 - browser-verifiable article extraction is still inconsistent
+
+## Terminal outcome classification added
+
+After the next request, `backend/researcher/test_research.py` was upgraded so that terminal output now explicitly shows:
+
+- `Model`
+- `Topic`
+- `Request Duration (ms)`
+- `Outcome`
+- `Degraded Signal`
+- `Ingest Status`
+
+### File edited
+
+- `backend/researcher/test_research.py`
+
+### Classification behavior implemented
+
+The script now classifies visible result text into:
+
+- `success_verified`
+- `success_fallback`
+
+This classification is currently:
+
+- terminal-side only
+- heuristic
+- based on response text markers
+
+Examples of fallback markers:
+
+- `Quick high-level note`
+- `no web research`
+- `page unavailable`
+- `could not verify`
+
+### Verification commands run
+
+- `uv run test_research.py "Tesla competitive advantages"`
+- `uv run test_research.py "Microsoft cloud revenue growth"`
+
+### Verification result
+
+Both runs printed the new `RUN SUMMARY` block successfully.
+
+Observed classifications:
+
+- `Tesla competitive advantages` -> `success_fallback`
+- `Microsoft cloud revenue growth` -> `success_fallback`
+
+So this change is verified to improve terminal observability, even though it does not yet prove any `success_verified` browser-based run in the current Lambda environment.

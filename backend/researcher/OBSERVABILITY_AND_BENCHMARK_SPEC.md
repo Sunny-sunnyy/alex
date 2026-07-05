@@ -157,6 +157,34 @@ Terminal output phải giúp phân biệt nhanh:
 - run thành công nhưng nội dung placeholder
 - run fail
 
+### Trạng thái hiện tại của terminal classification
+
+Trong pass hiện tại, `test_research.py` đã được nâng để in:
+
+- `Model`
+- `Topic`
+- `Request Duration (ms)`
+- `Outcome`
+- `Degraded Signal`
+- `Ingest Status`
+
+Lưu ý quan trọng:
+
+- đây là **terminal-side heuristic classification**
+- chưa phải server-side structured outcome chính thức
+- classification hiện phân loại:
+  - `success_verified`
+  - `success_fallback`
+
+Rule hiện tại dựa trên response text, ví dụ:
+
+- `Quick high-level note`
+- `no web research`
+- `page unavailable`
+- `could not verify`
+
+sẽ bị đánh dấu là `success_fallback`.
+
 ## 3. Quan hệ giữa terminal logs và CloudWatch
 
 Terminal là nơi quan sát nhanh.

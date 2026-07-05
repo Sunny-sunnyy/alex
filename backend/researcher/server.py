@@ -45,6 +45,10 @@ app = FastAPI(title="Alex Researcher Service")
 MCP_LOGGING_ENABLED = os.getenv("MCP_LOGGING") == "True"
 
 
+class VerifiedWebContentError(RuntimeError):
+    """Raised when the researcher cannot prove the note came from clean web content."""
+
+
 # Dataclass này đại diện cho một phase nhỏ trong lifecycle của một request research.
 # Nó lưu mốc bắt đầu, thời lượng, trạng thái cuối, và kiểu lỗi nếu phase đó fail.
 @dataclass
@@ -230,71 +234,69 @@ def _resolve_ingest_success(run_id: str, response_text: str) -> bool | None:
     return _infer_ingest_success(response_text)
 
 
+def _get_verified_ingest_observation(run_id: str) -> dict[str, Any] | None:
+    """Return the run-scoped ingest observation when a clean source URL was recorded."""
+    observation = get_last_ingest_observation(run_id)
+    if observation is None:
+        return None
+    if observation.get("success") is not True:
+        return None
+    source_url = observation.get("source_url")
+    if not isinstance(source_url, str) or not source_url.strip():
+        return None
+    return observation
+
+
 # Hàm này chuẩn hóa outcome cuối cho một request research.
-# Mục đích là để CloudWatch có cùng taxonomy dù request đi browser path hay fallback path.
+# Mục đích là để CloudWatch có cùng taxonomy dù request success hay fail ở browser path.
 def _classify_outcome(
     *,
     used_browser: bool,
-    used_fallback: bool,
+    verified_web: bool,
     ingest_success: bool | None,
     degraded_reason: str | None,
 ) -> str:
+    if verified_web:
+        return "success_verified"
     if ingest_success is False:
         return "failed_ingest"
-    if degraded_reason:
-        return "success_fallback"
-    if used_browser and not used_fallback:
-        return "success_verified"
-    if used_fallback:
-        return "success_fallback"
+    if used_browser or degraded_reason:
+        return "failed_browser"
     return "failed_unknown"
 
 
 # Hàm này dựng prompt đầu vào cho agent theo từng chế độ chạy.
-# Nó hỗ trợ 3 trường hợp: có topic cụ thể, fallback constrained, hoặc prompt mặc định.
+# Nó hỗ trợ 3 trường hợp: retry constrained, topic cụ thể, hoặc prompt mặc định.
 def _build_research_query(topic: Optional[str], constrained: bool = False) -> str:
+    if constrained:
+        return (
+            f"Research this investment topic: {topic or 'one of NVDA, MSFT, AMZN, AAPL, or TSLA'}. "
+            "Use exactly one clean direct article page from Investopedia, AP News, CNN Business, "
+            "or Reuters if Reuters loads cleanly without captcha. Avoid finance homepages, market "
+            "portals, trackers, about:blank, about:srcdoc, client-storage pages, and interstitials. "
+            "Never invent or guess an article URL slug. First discover the article URL from browser-visible "
+            "search results or on-site navigation, then open it. Use one content page and one snapshot. "
+            "Write 3-5 concise bullets, one recommendation, and include a line exactly like "
+            "'Source URL: https://...'. If you do not obtain verified web content from a real article page, "
+            "stop and say verified web content was not obtained. Do not write a fallback note and do not "
+            "call ingest_financial_document without a clean article URL."
+        )
+
     if topic:
         return (
             f"Research this investment topic: {topic}. "
             "Use a direct article page from Investopedia, AP News, or CNN Business if possible. "
             "Do not use finance homepages, market portals, tracker pages, or any source that redirects "
             "to captcha or access-restricted interstitial pages. If a source is blocked, switch once and continue. "
-            "If both allowed direct article attempts fail, stop browsing, write a quick high-level fallback note "
-            "from general market knowledge, include one recommendation, and ingest it immediately. "
-            "Do not ask the user to provide another link or choose another source."
-        )
-
-    if constrained:
-        return (
-            "Research one current large-cap US investment topic. Pick only one of these names: "
-            "NVDA, MSFT, AMZN, AAPL, or TSLA. Prefer a direct article page from Investopedia, "
-            "AP News, or CNN Business. Use Reuters only if the direct article page loads cleanly "
-            "without captcha. Do not use finance homepages, market portals, ad links, or tracker "
-            "pages. Use one content page, one snapshot, then write 3-5 concise bullets, one "
-            "recommendation, and call ingest_financial_document immediately. If the direct article "
-            "pages are blocked or unusable, stop browsing and produce a quick high-level fallback "
-            "note instead of asking the user for another link."
+            "Never invent or guess an article URL slug. First discover the article URL from browser-visible "
+            "search results or on-site navigation, then open it. "
+            "If both allowed direct article attempts fail, stop and say verified web content was not obtained. "
+            "Include a line exactly like 'Source URL: https://...' only when you actually used a clean article page. "
+            "Do not ask the user to provide another link or choose another source. "
+            "Do not write a fallback note from general market knowledge."
         )
 
     return DEFAULT_RESEARCH_PROMPT
-
-
-# Hàm này tạo prompt fallback không dùng browser.
-# Mục tiêu là vẫn tạo được một ghi chú ngắn và ingest vào knowledge base khi MCP/browser thất bại.
-def _build_browserless_fallback_query(topic: Optional[str]) -> str:
-    if topic:
-        return (
-            f"Create a short investment note about {topic} using your general market knowledge. "
-            "Do not browse the web. Be explicit that this is a quick high-level note, keep it to "
-            "3-5 bullets plus one recommendation, then call ingest_financial_document immediately."
-        )
-
-    return (
-        "Create a short investment note about exactly one of these names: NVDA, MSFT, AMZN, AAPL, "
-        "or TSLA using your general market knowledge. Do not browse the web. Be explicit that this "
-        "is a quick high-level note, keep it to 3-5 bullets plus one recommendation, then call "
-        "ingest_financial_document immediately."
-    )
 
 
 def _should_use_faster_browser_limits(topic: Optional[str]) -> bool:
@@ -410,15 +412,16 @@ async def run_research_agent(topic: str = None) -> str:
             os.environ.get("DEBUG"),
         )
 
-    # Thứ tự fallback:
+    # Thứ tự retry:
     # 1. Prompt bình thường + browser.
     # 2. Prompt constrained + browser.
-    # 3. Prompt browserless để tránh fail toàn request.
+    # Không có browserless ingest fallback trong verified-web-only mode.
     response_text: str | None = None
     used_browser = False
-    used_fallback = False
-    browser_max_turns = 10 if _should_use_faster_browser_limits(topic) else 15
-    constrained_browser_max_turns = 8 if _should_use_faster_browser_limits(topic) else 12
+    verified_web = False
+    request_error: Exception | None = None
+    browser_max_turns = 30
+    constrained_browser_max_turns = 12 if _should_use_faster_browser_limits(topic) else 15
 
     _start_phase(trace_state, "request_start")
 
@@ -455,7 +458,6 @@ async def run_research_agent(topic: str = None) -> str:
         logger.warning(
             "Default research prompt exceeded max turns; retrying with constrained fallback query."
         )
-        used_fallback = True
         try:
             # Nếu browser path đầu thất bại vì loop/max turns, ta siết topic/query để giảm độ nhiễu.
             _start_phase(trace_state, "constrained_browser_run")
@@ -485,32 +487,55 @@ async def run_research_agent(topic: str = None) -> str:
                 raise
         except MaxTurnsExceeded:
             logger.warning(
-                "Browser-based fallback also exceeded max turns; retrying without browser access."
+                "Constrained browser retry also exceeded max turns; verified web content was not obtained."
             )
-            browserless_query = _build_browserless_fallback_query(topic)
-            # Đây là lưới an toàn cuối cùng để service vẫn trả được kết quả usable thay vì 500.
-            _start_phase(trace_state, "browserless_fallback_run")
-            response_text = await _run_research_query(
-                browserless_query,
-                model,
-                max_turns=6,
-                use_browser=False,
+            raise VerifiedWebContentError(
+                "Verified web content not obtained before the browser turn limit was exhausted."
             )
-            _end_phase(trace_state, "browserless_fallback_run", status="ok")
         except Exception:
             raise
+    except VerifiedWebContentError as exc:
+        request_error = exc
+    except Exception as exc:
+        request_error = exc
     finally:
         # Khối finally này luôn cố gắng phát ra request_end summary dù request đi nhánh nào.
         if response_text:
             trace_state.degraded_reason = _detect_degraded_reason(response_text)
             trace_state.ingest_success = _resolve_ingest_success(trace_state.run_id, response_text)
+            if request_error is None:
+                if trace_state.degraded_reason:
+                    request_error = VerifiedWebContentError(
+                        f"Verified web content not obtained: {trace_state.degraded_reason}."
+                    )
+                elif _get_verified_ingest_observation(trace_state.run_id) is None:
+                    request_error = VerifiedWebContentError(
+                        "Verified web content not obtained: ingest did not record a clean source URL."
+                    )
+                else:
+                    verified_web = True
+        else:
+            trace_state.ingest_success = _resolve_ingest_success(trace_state.run_id, "")
+
+        if request_error is not None and trace_state.degraded_reason is None:
+            if isinstance(request_error, VerifiedWebContentError):
+                trace_state.degraded_reason = "verified_web_content_not_obtained"
+            else:
+                trace_state.degraded_reason = type(request_error).__name__
+
+        if response_text or request_error is not None:
             trace_state.outcome = _classify_outcome(
                 used_browser=used_browser,
-                used_fallback=used_fallback,
+                verified_web=verified_web,
                 ingest_success=trace_state.ingest_success,
                 degraded_reason=trace_state.degraded_reason,
             )
-        _end_phase(trace_state, "request_start", status="ok" if response_text else "error")
+        _end_phase(
+            trace_state,
+            "request_start",
+            status="ok" if verified_web else "error",
+            error_type=type(request_error).__name__ if request_error else None,
+        )
         total_duration_ms = trace_state.phases["request_start"].duration_ms or 0
         logger.info(
             "research_run request_end run_id=%s model=%s topic=%s outcome=%s ingest_success=%s degraded_reason=%s total_duration_ms=%s",
@@ -524,6 +549,9 @@ async def run_research_agent(topic: str = None) -> str:
         )
         clear_ingest_observation(trace_state.run_id)
         set_ingest_run_id(None)
+
+    if request_error is not None:
+        raise request_error
 
     return response_text
 
@@ -559,6 +587,9 @@ async def research(request: ResearchRequest) -> str:
     try:
         response = await run_research_agent(request.topic)
         return response
+    except VerifiedWebContentError as e:
+        logger.warning("Verified web content request failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         print(f"Error in research endpoint: {e}")
         import traceback

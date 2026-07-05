@@ -87,13 +87,17 @@ Hiện tại Researcher đã:
   - fallback output usable hơn
   - `uv run deploy.py` hiện đang deploy được lại
   - follow-up ingest propagation đã làm `request_end ingest_success` khớp hơn với tool-level ingest logs
+- trong pass mới nhất:
+  - `/research` chỉ còn chấp nhận `verified web content`
+  - tool ingest yêu cầu `source_url` sạch
+  - fallback note không còn được ingest vào S3 Vectors
 
 Nhưng vẫn còn hạn chế:
 
 - browser path trong Lambda vẫn không ổn định hoàn toàn;
-- nhiều request vẫn thành công nhờ fallback;
-- chưa chứng minh được `success_verified` ổn định trên production runtime hiện tại.
-- ngay cả khi có `research_ingest success=True`, `request_end ingest_success` vẫn chưa phản ánh đúng trong mọi run.
+- sau verified-web-only gate, nhiều benchmark topic giờ fail `500` thay vì ingest fallback;
+- chưa chứng minh được `success_verified` ổn định trên production runtime hiện tại;
+- browser vẫn dễ rơi vào `about:blank`, `about:srcdoc`, client-storage/interstitial, hoặc ad-tech paths trước khi có article body sạch;
 - một issue mới đã được xác nhận:
   - browser có thể `status=ok` nhưng vẫn không lấy được article content usable vì rơi vào `about:blank`, `about:srcdoc`, hoặc client-storage/interstitial paths.
 

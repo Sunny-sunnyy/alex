@@ -117,7 +117,6 @@ def create_playwright_mcp_server(timeout_seconds=120):
         "browser": {
             "launchOptions": {
                 "args": [
-                    "--single-process",
                     "--no-zygote",
                     "--disable-gpu",
                 ]

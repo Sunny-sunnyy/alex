@@ -977,3 +977,61 @@ The next debugging session should explicitly target:
 2. how to detect and cut off those paths earlier
 3. whether direct URL selection needs to be stricter or source-specific
 4. whether `browser_snapshot` should be attempted only after verifying the page is still on a real article URL
+
+## Verified-web-only enforcement pass
+
+After the observability follow-up, the next change intentionally tightened correctness:
+
+- the Researcher now fails hard unless it can produce **verified web-derived content**
+- fallback notes from general market knowledge are no longer allowed to be ingested
+- `ingest_financial_document` now requires a clean `source_url`
+
+### Behavior change
+
+The new rule is:
+
+- if the agent cannot prove it used a real article page, `/research` returns `500`
+- no fallback note is stored in S3 Vectors
+
+### Additional evidence gathered
+
+Two important things were verified on live Lambda after this pass:
+
+1. The anti-fabrication prompt helped:
+   - the agent stopped immediately ingesting guessed article URLs
+   - one live Microsoft run switched from:
+     - `page_not_found`
+     - to:
+     - `Verified web content not obtained: ingest did not record a clean source URL`
+   - CloudWatch showed the agent started from a Google search instead of going straight to a made-up article slug
+
+2. The deeper browser issue still remains:
+   - even after the agent used search first, the browser still drifted into:
+     - `about:blank`
+     - `about:srcdoc`
+     - ad-tech / sync / iframe paths
+   - the agent still failed to obtain a clean article body
+
+### Runtime experiment
+
+I also tried a small browser-runtime experiment:
+
+- removed `--single-process` from Playwright launch config
+
+Reason:
+
+- Chromium logs repeatedly showed:
+  - `Cannot use V8 Proxy resolver in single process mode`
+
+Result:
+
+- this experiment did **not** yet produce a verified successful Microsoft run
+- the live request still failed the verified-web-content gate
+
+### Current state after this pass
+
+What is now true:
+
+- correctness is tighter than before
+- fallback notes are no longer polluting the vector store
+- the system still does **not** reliably retrieve clean web article content in Lambda headless runtime

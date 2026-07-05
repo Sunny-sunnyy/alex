@@ -947,3 +947,57 @@ It should focus specifically on:
 - article-URL integrity
 - redirect/interstitial detection
 - verifying that the page is still a real article page before trusting snapshot-based extraction
+
+## Verified-web-only pass completed
+
+After the user explicitly changed the requirement, I updated the Researcher so:
+
+- fallback notes are no longer acceptable ingest payloads
+- `ingest_financial_document` requires a clean `source_url`
+- `/research` returns `500` if verified web content is not obtained
+- browser max turns were increased to `30` for the primary browser run
+
+### Files edited
+
+- `backend/researcher/context.py`
+- `backend/researcher/server.py`
+- `backend/researcher/tools.py`
+- `backend/researcher/test_research.py`
+- `backend/researcher/mcp_servers.py`
+
+### Live verification after this pass
+
+Deployed image tags during this pass:
+
+- `deploy-1783267083`
+- `deploy-1783267341`
+- `deploy-1783267702`
+
+Representative live results:
+
+- `Microsoft cloud revenue growth`
+  - first failed with:
+    - `Verified web content not obtained: page_not_found.`
+  - after anti-fabrication prompt update failed with:
+    - `Verified web content not obtained: ingest did not record a clean source URL.`
+- `Tesla competitive advantages`
+  - failed with:
+    - `Verified web content not obtained: page_unavailable.`
+
+### Important interpretation
+
+This pass improved correctness and evidence quality, but it did **not** yet make browser article retrieval stable.
+
+What improved:
+
+- no fallback note should be ingested into S3 Vectors
+- live CloudWatch clearly distinguishes:
+  - `failed_browser`
+  - verified-web-content gating failures
+- the agent was pushed away from fabricating direct article URLs
+
+What still remains:
+
+- browser sessions still drift into ad-tech / iframe / blank-page paths
+- clean article extraction is still not proven stable on Lambda headless runtime
+- one runtime experiment removed Playwright `--single-process`, but this did not yet produce a verified successful Microsoft run

@@ -75,7 +75,7 @@ def classify_terminal_result(result_text: str) -> tuple[str, str | None]:
 
     for marker in fallback_markers:
         if marker in lowered:
-            return "success_fallback", marker
+            return "unexpected_200_nonverified", marker
 
     return "success_verified", None
 
@@ -165,7 +165,7 @@ def test_research(topic=None):
         # Parse and display the result
         result = response.json()
         outcome, degraded_signal = classify_terminal_result(result)
-        ingest_status = "assumed_success"
+        ingest_status = "assumed_success" if outcome == "success_verified" else "not_verified"
 
         print("\n✅ Research generated successfully!")
         print("\nRUN SUMMARY")
@@ -198,6 +198,9 @@ def test_research(topic=None):
             try:
                 error_detail = e.response.json()
                 print(f"   Error details: {error_detail}")
+                detail_text = str(error_detail)
+                if "Verified web content not obtained" in detail_text:
+                    print("   Request failed as designed: no clean article content was verified, so nothing should be ingested.")
             except (json.JSONDecodeError, AttributeError):
                 print(f"   Response: {e.response.text}")
         sys.exit(1)

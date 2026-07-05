@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from threading import Lock
 from typing import Dict, Any
 from datetime import datetime, UTC
+from urllib.parse import urlparse
 import httpx
 from agents import function_tool
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -23,6 +24,30 @@ ALEX_API_KEY = os.getenv("ALEX_API_KEY")
 _INGEST_RUN_ID: ContextVar[str | None] = ContextVar("researcher_ingest_run_id", default=None)
 _INGEST_OBSERVATIONS: dict[str, Dict[str, Any]] = {}
 _INGEST_OBSERVATIONS_LOCK = Lock()
+_ALLOWED_SOURCE_DOMAINS = (
+    "investopedia.com",
+    "apnews.com",
+    "cnn.com",
+    "reuters.com",
+)
+_BLOCKED_SOURCE_MARKERS = (
+    "about:blank",
+    "about:srcdoc",
+    "client_storage",
+    "optimizely",
+    "captcha",
+    "consent",
+    "error",
+)
+_DEGRADED_ANALYSIS_MARKERS = (
+    "quick high-level note",
+    "quick high-level fallback note",
+    "general market knowledge",
+    "fallback note",
+    "web research failed",
+    "verified web content was not obtained",
+    "could not obtain verified web content",
+)
 
 
 def set_ingest_run_id(run_id: str | None) -> None:
@@ -64,6 +89,29 @@ def _record_ingest_observation(run_id: str | None, result: Dict[str, Any]) -> No
         _INGEST_OBSERVATIONS[run_id] = dict(result)
 
 
+def _is_allowed_source_url(source_url: str) -> bool:
+    parsed = urlparse(source_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    lowered_url = source_url.lower()
+    if any(marker in lowered_url for marker in _BLOCKED_SOURCE_MARKERS):
+        return False
+    host = parsed.netloc.lower()
+    return any(domain in host for domain in _ALLOWED_SOURCE_DOMAINS)
+
+
+def _looks_like_degraded_analysis(analysis: str) -> bool:
+    lowered = analysis.lower()
+    return any(marker in lowered for marker in _DEGRADED_ANALYSIS_MARKERS)
+
+
+def _normalize_analysis(analysis: str, source_url: str) -> str:
+    cleaned = analysis.strip()
+    if "source url:" in cleaned.lower():
+        return cleaned
+    return f"Source URL: {source_url}\n\n{cleaned}"
+
+
 # Hàm nội bộ này thực hiện HTTP POST thật tới ingest API.
 # Nó được tách riêng để lớp retry ở bên ngoài có thể tái sử dụng mà không lặp code.
 def _ingest(document: Dict[str, Any]) -> Dict[str, Any]:
@@ -93,7 +141,7 @@ def ingest_with_retries(document: Dict[str, Any]) -> Dict[str, Any]:
 # Đây là function tool mà agent có thể gọi trực tiếp.
 # Nhiệm vụ của nó là đóng gói topic/analysis thành document và gửi sang ingest pipeline.
 @function_tool
-def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
+def ingest_financial_document(topic: str, analysis: str, source_url: str) -> Dict[str, Any]:
     """
     Ingest a financial document into the Alex knowledge base.
     
@@ -105,27 +153,66 @@ def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
         Dictionary with success status and document ID
     """
     run_id = _INGEST_RUN_ID.get()
-    if not ALEX_API_ENDPOINT or not ALEX_API_KEY:
+    if not _is_allowed_source_url(source_url):
         result = {
             "success": False,
-            "error": "Alex API not configured. Running in local mode."
+            "error": "Verified web content required: source_url must be a clean direct article URL.",
+            "source_url": source_url,
         }
         _record_ingest_observation(run_id, result)
         logger.info(
-            "research_ingest run_id=%s success=%s topic=%s document_id=%s error=%s",
+            "research_ingest run_id=%s success=%s topic=%s document_id=%s source_url=%s error=%s",
             run_id,
             result["success"],
             topic,
             None,
+            source_url,
+            result["error"],
+        )
+        return result
+
+    if _looks_like_degraded_analysis(analysis):
+        result = {
+            "success": False,
+            "error": "Verified web content required: refusing to ingest degraded or fallback analysis.",
+            "source_url": source_url,
+        }
+        _record_ingest_observation(run_id, result)
+        logger.info(
+            "research_ingest run_id=%s success=%s topic=%s document_id=%s source_url=%s error=%s",
+            run_id,
+            result["success"],
+            topic,
+            None,
+            source_url,
+            result["error"],
+        )
+        return result
+
+    if not ALEX_API_ENDPOINT or not ALEX_API_KEY:
+        result = {
+            "success": False,
+            "error": "Alex API not configured. Running in local mode.",
+            "source_url": source_url,
+        }
+        _record_ingest_observation(run_id, result)
+        logger.info(
+            "research_ingest run_id=%s success=%s topic=%s document_id=%s source_url=%s error=%s",
+            run_id,
+            result["success"],
+            topic,
+            None,
+            source_url,
             result["error"],
         )
         return result
     
     document = {
-        "text": analysis,
+        "text": _normalize_analysis(analysis, source_url),
         "metadata": {
             "topic": topic,
-            "timestamp": datetime.now(UTC).isoformat()
+            "timestamp": datetime.now(UTC).isoformat(),
+            "source_url": source_url,
         }
     }
     
@@ -134,30 +221,34 @@ def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
         result = {
             "success": True,
             "document_id": ingest_result.get("document_id"),  # Changed from documentId
-            "message": f"Successfully ingested analysis for {topic}"
+            "message": f"Successfully ingested analysis for {topic}",
+            "source_url": source_url,
         }
         _record_ingest_observation(run_id, result)
         logger.info(
-            "research_ingest run_id=%s success=%s topic=%s document_id=%s error=%s",
+            "research_ingest run_id=%s success=%s topic=%s document_id=%s source_url=%s error=%s",
             run_id,
             result["success"],
             topic,
             result["document_id"],
+            source_url,
             None,
         )
         return result
     except Exception as e:
         result = {
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "source_url": source_url,
         }
         _record_ingest_observation(run_id, result)
         logger.info(
-            "research_ingest run_id=%s success=%s topic=%s document_id=%s error=%s",
+            "research_ingest run_id=%s success=%s topic=%s document_id=%s source_url=%s error=%s",
             run_id,
             result["success"],
             topic,
             None,
+            source_url,
             result["error"],
         )
         return result

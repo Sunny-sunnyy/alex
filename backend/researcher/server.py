@@ -81,15 +81,21 @@ def _get_researcher_model_name() -> str:
 # Nó hỗ trợ 3 trường hợp: có topic cụ thể, fallback constrained, hoặc prompt mặc định.
 def _build_research_query(topic: Optional[str], constrained: bool = False) -> str:
     if topic:
-        return f"Research this investment topic: {topic}"
+        return (
+            f"Research this investment topic: {topic}. "
+            "Use a direct article page from Investopedia, AP News, or CNN Business if possible. "
+            "Do not use finance homepages, market portals, tracker pages, or any source that redirects "
+            "to captcha or access-restricted interstitial pages. If a source is blocked, switch once and continue."
+        )
 
     if constrained:
         return (
             "Research one current large-cap US investment topic. Pick only one of these names: "
-            "NVDA, MSFT, AMZN, AAPL, or TSLA. Use Reuters first, or a direct MarketWatch article "
-            "if Reuters is not immediately useful. Do not use finance homepages, ad links, or "
-            "tracker pages. Use one content page, one snapshot, then write 3-5 concise bullets, "
-            "one recommendation, and call ingest_financial_document immediately."
+            "NVDA, MSFT, AMZN, AAPL, or TSLA. Prefer a direct article page from Investopedia, "
+            "AP News, or CNN Business. Use Reuters only if the direct article page loads cleanly "
+            "without captcha. Do not use finance homepages, market portals, ad links, or tracker "
+            "pages. Use one content page, one snapshot, then write 3-5 concise bullets, one "
+            "recommendation, and call ingest_financial_document immediately."
         )
 
     return DEFAULT_RESEARCH_PROMPT

@@ -1,0 +1,301 @@
+# Researcher Session Handoff
+
+Date: 2026-07-05
+
+## Context read and confirmed
+
+I read the required project and researcher context before making changes:
+
+- `gameplan.md`
+- `guides/architecture.md`
+- `guides/agent_architecture.md`
+- `guides/1_permissions.md`
+- `guides/2_sagemaker.md`
+- `guides/3_ingest.md`
+- `guides/4_researcher.md`
+- `backend/ingest/*` relevant code and docs
+- `backend/researcher/*` relevant code and docs
+- `terraform/2_sagemaker/*`
+- `terraform/3_ingestion/*`
+- `terraform/4_researcher/*`
+- `docs/superpowers/plans/2026-07-05-researcher-observability-stability-benchmark.md`
+
+I also read Guides 5-8 to preserve full-course context because `gameplan.md` and `AGENTS.md` require end-to-end understanding before changing the repo.
+
+## Current project reality confirmed
+
+Guide 4 has partial historical mismatch with the current repo implementation.
+
+Current source of truth in this repo:
+
+- Researcher deployment uses AWS Lambda container image
+- Public entrypoint uses Lambda Function URL
+- Researcher is not currently using App Runner
+- Researcher is currently using `openai/gpt-5.4-nano`
+- OpenAI Agents SDK tracing is still expected if `OPENAI_API_KEY` is configured
+
+Relevant source-of-truth files:
+
+- `backend/researcher/server.py`
+- `backend/researcher/deploy.py`
+- `backend/researcher/Dockerfile`
+- `backend/researcher/mcp_servers.py`
+- `terraform/4_researcher/main.tf`
+
+## User-approved scope
+
+The user selected scope `A`:
+
+- Make Guide 4 Step 4 pass stably on the current real implementation
+- Do not try to force the repo back to App Runner or Bedrock in this phase
+- Work directly in `backend/researcher` and `terraform/4_researcher`
+
+## Backup decision
+
+We explicitly decided not to create duplicate folders such as:
+
+- `researcher_original`
+- `4_researcher_original`
+
+Reason:
+
+- duplicated folders would create drift and confusion
+- git is the correct backup mechanism for this repo
+
+## Snapshot created before any new fixes
+
+I staged the current researcher-related state, committed it, and pushed it to remote.
+
+Checkpoint commit:
+
+- `0409b99` - `chore: checkpoint researcher lambda guide4 state`
+
+Remote status:
+
+- pushed to `origin/main`
+
+This commit is now the rollback point for any upcoming Guide 4 Step 4 fixes.
+
+## What has been done in this session
+
+1. Loaded the required workflow skills and followed `using-superpowers` with `brainstorming` as the main discussion process.
+2. Read the required project guides, researcher code, terraform, and researcher-specific debugging documents.
+3. Confirmed the real deployment/runtime model differs from older App Runner wording in Guide 4.
+4. Confirmed the student is currently at Guide 4, Step 4.
+5. Confirmed the working goal is stability on the current Lambda Function URL implementation.
+6. Created a git checkpoint and pushed it before starting any new fix work.
+
+## Important technical findings already confirmed
+
+- The repo has existing researcher instability history documented in `BUG_AND_FIX.md`
+- A previously proven failure mode was `MaxTurnsExceeded` caused by MCP/browser loops
+- A newer degraded mode is suspected around Playwright/browser snapshot behavior and read-only filesystem (`EROFS`)
+- That newer filesystem issue was noted as a working hypothesis that still needs evidence-driven confirmation before changing code further
+
+## Next proposed step
+
+Next step is to reproduce the current Guide 4 Step 4 failure mode on the real deployed flow and prove the current root cause before making code changes.
+
+Planned order:
+
+1. reproduce current behavior
+2. inspect evidence
+3. classify the actual failure mode
+4. apply the smallest fix supported by evidence
+
+## Waiting for user confirmation
+
+No new researcher fix has been implemented after the checkpoint commit yet.
+
+Waiting for explicit confirmation before starting:
+
+- reproduction
+- debugging
+- code changes for the next fix
+
+## Reproduction completed after confirmation
+
+After the user confirmed the next step, I reproduced the current deployed behavior again on the real Lambda Function URL.
+
+### Commands run
+
+- `uv run test_research.py "Bitcoin ETF inflows"`
+- `uv run test_research.py "Tesla competitive advantages"`
+- `aws logs tail /aws/lambda/alex-researcher --since 5m --region ap-southeast-1`
+
+### What the latest reproduction proved
+
+Both test requests returned:
+
+- HTTP `200 OK`
+- non-empty research content
+- successful end-to-end service execution
+
+This is important because it means the current deployed service is no longer in the previously observed hard-failure state for these scenarios.
+
+### Actual returned behavior
+
+For `Tesla competitive advantages`:
+
+- the service returned a concise investment note with clear bullets and recommendation
+- the result quality was acceptable for Guide 4 Step 4
+
+For `Bitcoin ETF inflows`:
+
+- the service returned a constrained but still usable note
+- it explicitly stated that daily inflow figures could not be verified because source pages were access-restricted
+- it still provided interpretation guidance and a recommendation structure
+
+This is weaker than ideal, but it is materially better than a placeholder or HTTP error.
+
+### Current root cause classification
+
+CloudWatch logs still show the same structural browser problem:
+
+- Reuters redirects into `geo.captcha-delivery.com`
+- browser sessions still encounter noisy ad/tracker/interstitial behavior
+- browser navigation remains unreliable inside Lambda headless runtime
+
+But the latest evidence does **not** show the service fully failing for the reproduced cases.
+
+So the current diagnosis is:
+
+- browser-based research is still unstable
+- fallback behavior is currently good enough to keep many requests successful
+- the main remaining problem is **result quality consistency**, not basic availability
+
+### Updated technical conclusion
+
+At this point, the system appears to be in this state:
+
+1. deployment drift was previously fixed
+2. service health is good
+3. browser path is still noisy and source-restricted
+4. fallback is often rescuing the request successfully
+5. remaining work should focus on:
+   - improving consistency of fallback output quality, or
+   - tightening acceptance criteria / guide expectations for Step 4 on the current Lambda implementation
+
+### Recommended next task
+
+The recommended next task is no longer "fix a hard failure first".
+
+It is now:
+
+- harden researcher output quality for blocked topics while preserving the current successful `200 OK` behavior
+
+That is the smallest next step that matches the current evidence.
+
+## Stable-source pass completed
+
+After the next user confirmation, I applied a narrow stable-source pass to bias the Researcher toward cleaner direct article pages.
+
+### Files edited
+
+- `backend/researcher/context.py`
+- `backend/researcher/server.py`
+- `backend/researcher/OBSERVABILITY_AND_BENCHMARK_SPEC.md`
+- `docs/superpowers/plans/2026-07-05-researcher-observability-stability-benchmark.md`
+- `terraform/4_researcher/researcher.auto.tfvars.json`
+- `backend/researcher/session_handoff.md`
+
+### Behavior changes made
+
+In prompts and query builders:
+
+- added `CNN Business` to the preferred source set
+- prioritized:
+  - `Investopedia`
+  - `AP News`
+  - `CNN Business`
+- downgraded Reuters to optional-only when a direct article loads cleanly
+- explicitly told the agent to avoid:
+  - finance homepages
+  - market portals
+  - tracker pages
+  - captcha/interstitial flows
+
+In benchmark/spec docs:
+
+- replaced weaker benchmark topics with a more stable large-cap/business set:
+  - `Tesla competitive advantages`
+  - `Microsoft cloud revenue growth`
+  - `NVIDIA AI datacenter demand`
+  - `Amazon advertising growth`
+  - `Apple services revenue growth`
+
+### Deployment method used
+
+`uv run deploy.py` failed again because Terraform AWS provider still crashed with:
+
+- `Plugin did not respond`
+
+So I used the previously proven manual deployment path:
+
+1. build Docker image locally
+2. log in to ECR
+3. push new image tag
+4. update Lambda code directly with AWS CLI
+5. wait until Lambda reached:
+   - `LastUpdateStatus=Successful`
+   - `State=Active`
+
+Deployed image tag:
+
+- `deploy-1783240866`
+
+### Verification commands run
+
+- `curl -m 30 -sS https://u7lbfi3ovnkij7hwffzv7ehqxm0kzvbo.lambda-url.ap-southeast-1.on.aws/health`
+- `uv run test_research.py "Tesla competitive advantages"`
+- `uv run test_research.py "Microsoft cloud revenue growth"`
+- `uv run test_research.py "NVIDIA AI datacenter demand"`
+- `aws logs tail /aws/lambda/alex-researcher --since 5m --region ap-southeast-1`
+
+### What the verification proved
+
+`/health` confirmed:
+
+- service healthy
+- model still `openai/gpt-5.4-nano`
+- Lambda container runtime reachable
+
+All three deployed end-to-end tests returned:
+
+- HTTP `200 OK`
+- non-empty result
+- successful request completion
+
+But the output quality remained mixed:
+
+- `Tesla competitive advantages`
+  - returned a useful browserless fallback note
+- `NVIDIA AI datacenter demand`
+  - returned a useful browserless fallback note
+- `Microsoft cloud revenue growth`
+  - stayed in browser mode longer and returned a constrained note explaining that clean direct article pages were not successfully verified
+
+### CloudWatch evidence after the stable-source pass
+
+The logs show the source bias did change as intended:
+
+- Tesla runs opened Investopedia direct article pages
+- NVIDIA runs opened a CNN article page
+- Microsoft runs attempted the preferred stable-source set
+
+However, the logs still prove browser instability remains:
+
+- direct article pages still bounce into `about:blank` or noisy side flows
+- some runs still exceed browser turns and fall back
+- browser-based success is still not reliable enough to call this fully fixed
+
+### Current status after this pass
+
+This pass improved source targeting, but did not fully solve Lambda browser instability.
+
+The current honest state is:
+
+- Step 4 is practically passable because requests return `200 OK`
+- useful notes are still being produced and ingested
+- the service is still relying heavily on fallback/degraded paths for stability
+- browser-verifiable article extraction is still inconsistent

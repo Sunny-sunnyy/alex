@@ -8,6 +8,60 @@
 
 **Tech Stack:** Python 3.12, FastAPI, OpenAI Agents SDK, LiteLLM, Playwright MCP, AWS Lambda Function URL, CloudWatch Logs, Terraform, `uv`
 
+## Status Update - 2026-07-05
+
+Current verified state before the broader observability work:
+
+- deployed Researcher is Lambda Function URL based, not App Runner
+- active runtime model is `openai/gpt-5.4-nano`
+- deployment drift was previously confirmed and corrected by redeploying the current image
+- latest reproduced deployed runs returned `200 OK` for:
+  - `Tesla competitive advantages`
+  - `Bitcoin ETF inflows`
+- CloudWatch still shows browser instability via captcha, ad/tracker churn, and access-restricted pages
+- current primary risk is result quality consistency, not total availability
+
+Validated commands used for this status:
+
+- `uv run backend/researcher/test_research.py "Tesla competitive advantages"`
+- `uv run backend/researcher/test_research.py "Bitcoin ETF inflows"`
+- `aws logs tail /aws/lambda/alex-researcher --since 5m --region ap-southeast-1`
+
+Operational choice for the next stable benchmark pass:
+
+- bias topics toward large-cap equity and mainstream business themes
+- bias browsing toward direct article pages from Investopedia, AP News, and CNN Business
+- use Reuters only when a direct article page loads cleanly without captcha
+
+Execution update after this decision:
+
+- prompt/query source bias was implemented in:
+  - `backend/researcher/context.py`
+  - `backend/researcher/server.py`
+- manual deployment was used because `uv run deploy.py` still failed on Terraform AWS provider initialization
+- deployed image tag advanced to `deploy-1783240866`
+
+Verification commands run after the source-bias change:
+
+- `curl -m 30 -sS https://u7lbfi3ovnkij7hwffzv7ehqxm0kzvbo.lambda-url.ap-southeast-1.on.aws/health`
+- `uv run backend/researcher/test_research.py "Tesla competitive advantages"`
+- `uv run backend/researcher/test_research.py "Microsoft cloud revenue growth"`
+- `uv run backend/researcher/test_research.py "NVIDIA AI datacenter demand"`
+- `aws logs tail /aws/lambda/alex-researcher --since 5m --region ap-southeast-1`
+
+Observed outcome:
+
+- all three deployed tests returned `200 OK`
+- Tesla and NVIDIA ended in useful browserless fallback notes
+- Microsoft returned a constrained note after failing to verify clean direct article pages
+- CloudWatch confirmed the new source preference was actually exercised:
+  - Investopedia pages for Tesla
+  - CNN article path for NVIDIA
+- CloudWatch also confirmed instability still remains in the browser path:
+  - `about:blank` churn
+  - browser max-turn fallback
+  - no reliable clean-article extraction yet
+
 ## Global Constraints
 
 - Fix bug instability before benchmarking models.
@@ -17,6 +71,7 @@
 - Benchmark only on deployed Lambda runtime, not local-only runs.
 - Compare exactly two models first: `openrouter` `gpt-oss-120b` and `openai/gpt-5.4-nano`.
 - Use exactly 5 fixed topics for the first benchmark round.
+- Prefer direct article pages from Investopedia, AP News, and CNN Business during the first stable benchmark round.
 - Avoid redesigning the `/research` API contract unless strictly required by evidence.
 
 ---
@@ -432,9 +487,9 @@ Run:
 cd backend/researcher
 uv run test_research.py "Tesla competitive advantages"
 uv run test_research.py "Microsoft cloud revenue growth"
-uv run test_research.py "NVIDIA AI chip demand"
-uv run test_research.py "Oil price outlook"
-uv run test_research.py "Bitcoin ETF inflows"
+uv run test_research.py "NVIDIA AI datacenter demand"
+uv run test_research.py "Amazon advertising growth"
+uv run test_research.py "Apple services revenue growth"
 ```
 
 Expected:
@@ -567,9 +622,9 @@ git commit -m "fix: reduce researcher browser instability in lambda runtime"
 ## Fixed Topics
 1. Tesla competitive advantages
 2. Microsoft cloud revenue growth
-3. NVIDIA AI chip demand
-4. Oil price outlook
-5. Bitcoin ETF inflows
+3. NVIDIA AI datacenter demand
+4. Amazon advertising growth
+5. Apple services revenue growth
 ```
 
 - [ ] **Step 2: Document the exact model-by-model workflow**
@@ -649,9 +704,9 @@ Run:
 cd backend/researcher
 uv run test_research.py "Tesla competitive advantages"
 uv run test_research.py "Microsoft cloud revenue growth"
-uv run test_research.py "NVIDIA AI chip demand"
-uv run test_research.py "Oil price outlook"
-uv run test_research.py "Bitcoin ETF inflows"
+uv run test_research.py "NVIDIA AI datacenter demand"
+uv run test_research.py "Amazon advertising growth"
+uv run test_research.py "Apple services revenue growth"
 ```
 
 Expected:
@@ -704,9 +759,9 @@ Run:
 cd backend/researcher
 uv run test_research.py "Tesla competitive advantages"
 uv run test_research.py "Microsoft cloud revenue growth"
-uv run test_research.py "NVIDIA AI chip demand"
-uv run test_research.py "Oil price outlook"
-uv run test_research.py "Bitcoin ETF inflows"
+uv run test_research.py "NVIDIA AI datacenter demand"
+uv run test_research.py "Amazon advertising growth"
+uv run test_research.py "Apple services revenue growth"
 ```
 
 Expected:
@@ -768,4 +823,3 @@ git commit -m "docs: record researcher benchmark findings"
 
 - `run_research_agent()` changes from returning `str` to `tuple[str, RunTrace]`; all call sites in `server.py` must be updated consistently.
 - Normalized outcome strings stay fixed across Tasks 1, 3, 4, and 9.
-

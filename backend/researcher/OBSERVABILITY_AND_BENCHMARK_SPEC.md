@@ -245,15 +245,63 @@ Chạy 5 topic ngắn, thực dụng:
 
 1. `Tesla competitive advantages`
 2. `Microsoft cloud revenue growth`
-3. `NVIDIA AI chip demand`
-4. `Oil price outlook`
-5. `Bitcoin ETF inflows`
+3. `NVIDIA AI datacenter demand`
+4. `Amazon advertising growth`
+5. `Apple services revenue growth`
 
 Mục tiêu của bộ topic này:
 
 - dễ so sánh giữa các lần chạy
 - có đủ đa dạng
 - không làm benchmark quá dài và tốn chi phí
+- ưu tiên các chủ đề có xác suất cao tìm được direct article page sạch hơn trong Lambda runtime hiện tại
+
+## Bộ source ưu tiên cho benchmark stability
+
+Để tránh đánh đồng lỗi source-access với lỗi model/runtime, benchmark vòng đầu nên ưu tiên:
+
+1. `Investopedia`
+2. `AP News`
+3. `CNN Business`
+
+`Reuters` chỉ nên dùng như nguồn phụ khi một direct article page tải sạch, không bị:
+
+- captcha
+- access restriction
+- ad/interstitial churn
+
+Không dùng homepage hoặc market portal làm điểm vào benchmark đầu vì chúng tạo quá nhiều nhiễu cho Lambda headless browser.
+
+## Trạng thái xác minh hiện tại
+
+Trong đợt kiểm tra ngày `2026-07-05`, source preference này đã được áp vào runtime và kiểm tra lại trên Lambda deploy thật.
+
+Đã chạy:
+
+- `Tesla competitive advantages`
+- `Microsoft cloud revenue growth`
+- `NVIDIA AI datacenter demand`
+
+Kết quả xác minh:
+
+- cả 3 request đều trả về `200 OK`
+- CloudWatch cho thấy Researcher thực sự đã cố đi theo source set mới:
+  - Investopedia cho Tesla
+  - CNN article path cho NVIDIA
+  - stable-source attempts cho Microsoft
+
+Tuy nhiên, source set sạch hơn **chưa đủ** để biến browser path thành ổn định hoàn toàn.
+
+Các failure mode vẫn còn thấy trong log:
+
+- `about:blank` churn
+- browser max-turn fallback
+- direct article page mở được nhưng không luôn trích xuất được nội dung usable
+
+Vì vậy spec benchmark hiện tại nên được hiểu như sau:
+
+- bộ source này là **best-effort stable set**
+- không phải bằng chứng rằng browser verification đã được giải quyết triệt để
 
 ## Chỉ số so sánh vòng đầu
 

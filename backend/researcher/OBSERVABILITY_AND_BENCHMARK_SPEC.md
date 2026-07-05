@@ -185,6 +185,34 @@ Rule hiện tại dựa trên response text, ví dụ:
 
 sẽ bị đánh dấu là `success_fallback`.
 
+### False-positive fix đã được xác minh
+
+Trong một run thực tế, `Tesla competitive advantages` từng bị gắn nhầm:
+
+- `success_verified`
+
+mặc dù response text có dấu hiệu degraded rõ ràng.
+
+Sau đó heuristic đã được siết lại bằng các marker bổ sung như:
+
+- `just a moment`
+- `page not found`
+- `404 / unavailable`
+- `access-restricted`
+- `usable direct article page`
+- `couldn't reliably quote`
+
+Verification sau fix trên deployed Lambda:
+
+- `Tesla competitive advantages`
+- `Microsoft cloud revenue growth`
+- `NVIDIA AI datacenter demand`
+
+Kết quả:
+
+- cả 3 run đều bị gắn `success_fallback`
+- không còn false-positive `success_verified` trong nhóm case degraded đã kiểm tra
+
 ## 3. Quan hệ giữa terminal logs và CloudWatch
 
 Terminal là nơi quan sát nhanh.

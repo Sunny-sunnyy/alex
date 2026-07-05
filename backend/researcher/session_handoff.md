@@ -350,3 +350,79 @@ Observed classifications:
 - `Microsoft cloud revenue growth` -> `success_fallback`
 
 So this change is verified to improve terminal observability, even though it does not yet prove any `success_verified` browser-based run in the current Lambda environment.
+
+## Terminal classification false-positive fix completed
+
+After the next user report, I confirmed that the first terminal heuristic was too weak.
+
+### Bug observed
+
+The user ran:
+
+- `uv run test_research.py "Tesla competitive advantages"`
+
+and the script incorrectly printed:
+
+- `Outcome: success_verified`
+- `Degraded Signal: none`
+
+even though the response text clearly contained blocked/degraded evidence such as:
+
+- `Just a moment...`
+- `404 / unavailable`
+- `access-restricted`
+- inability to use a clean direct article page
+
+So the terminal summary had a false positive.
+
+### What I changed
+
+I tightened `classify_terminal_result()` in:
+
+- `backend/researcher/test_research.py`
+
+Added stronger fallback markers for phrases actually seen in deployed outputs, including:
+
+- `just a moment`
+- `page not found`
+- `404 / unavailable`
+- `access-restricted`
+- `clean, accessible article content`
+- `usable direct article page`
+- `couldn't reliably quote`
+- `couldn't base the analysis on a usable direct article page`
+- `error page`
+
+### Verification commands run
+
+- `uv run test_research.py "Tesla competitive advantages"`
+- `uv run test_research.py "Microsoft cloud revenue growth"`
+- `uv run test_research.py "NVIDIA AI datacenter demand"`
+
+### Verification result
+
+All three runs returned:
+
+- HTTP `200 OK`
+- visible `RUN SUMMARY`
+- `Outcome: success_fallback`
+
+Observed degraded signals after the fix:
+
+- `Tesla competitive advantages` -> `quick high-level note`
+- `Microsoft cloud revenue growth` -> `quick high-level note`
+- `NVIDIA AI datacenter demand` -> `quick high-level note`
+
+### Conclusion
+
+`Task 0.5` is complete:
+
+- the known false-positive terminal classification was reproduced
+- the heuristic was corrected
+- the fix was verified on multiple deployed end-to-end runs
+
+Important remaining truth:
+
+- this does **not** mean browser-based verified success is now common
+- it means the terminal summary is now less misleading
+- the next task should still be structured observability in `server.py`

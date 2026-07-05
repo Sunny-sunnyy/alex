@@ -84,6 +84,30 @@ Observed terminal classification:
 - degraded signals were visible directly in terminal without opening CloudWatch
 - no `success_verified` run was observed in this verification pass
 
+Follow-up fix after user validation:
+
+- a real deployed `Tesla competitive advantages` run exposed a false-positive `success_verified`
+- root cause was incomplete terminal fallback markers in `test_research.py`
+- heuristic was tightened with deployed-output phrases such as:
+  - `just a moment`
+  - `page not found`
+  - `404 / unavailable`
+  - `access-restricted`
+  - `usable direct article page`
+  - `couldn't reliably quote`
+
+Re-verification after the heuristic fix:
+
+- `uv run backend/researcher/test_research.py "Tesla competitive advantages"`
+- `uv run backend/researcher/test_research.py "Microsoft cloud revenue growth"`
+- `uv run backend/researcher/test_research.py "NVIDIA AI datacenter demand"`
+
+Observed outcome after the fix:
+
+- all three runs printed `Outcome: success_fallback`
+- the known false-positive `success_verified` case was removed
+- terminal output is now reliable enough to finish `Task 0.5` before moving to server-side observability
+
 ## Global Constraints
 
 - Fix bug instability before benchmarking models.

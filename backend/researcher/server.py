@@ -7,6 +7,9 @@ Alex Researcher Service - Investment Advice Agent
 
 import os
 import logging
+import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Any, Optional
 
@@ -34,6 +37,65 @@ app = FastAPI(title="Alex Researcher Service")
 
 
 MCP_LOGGING_ENABLED = os.getenv("MCP_LOGGING") == "True"
+
+
+@dataclass
+class PhaseRecord:
+    name: str
+    started_at: float
+    duration_ms: int | None = None
+    status: str = "started"
+    error_type: str | None = None
+
+
+@dataclass
+class RunTrace:
+    run_id: str
+    topic: str
+    model: str
+    phases: dict[str, PhaseRecord] = field(default_factory=dict)
+    outcome: str | None = None
+    ingest_success: bool | None = None
+    degraded_reason: str | None = None
+
+
+# Observability model for each /research run:
+# - one run_id per request
+# - one start/end record per major phase
+# - one normalized outcome per completed request
+# This is used to debug instability before benchmarking models.
+def _start_phase(trace_state: RunTrace, phase: str) -> None:
+    trace_state.phases[phase] = PhaseRecord(name=phase, started_at=time.perf_counter())
+    logger.info(
+        "research_run phase_start run_id=%s model=%s topic=%s phase=%s",
+        trace_state.run_id,
+        trace_state.model,
+        trace_state.topic,
+        phase,
+    )
+
+
+def _end_phase(
+    trace_state: RunTrace,
+    phase: str,
+    *,
+    status: str,
+    error_type: str | None = None,
+) -> None:
+    record = trace_state.phases[phase]
+    record.duration_ms = int((time.perf_counter() - record.started_at) * 1000)
+    record.status = status
+    record.error_type = error_type
+    logger.info(
+        "research_run phase_end run_id=%s model=%s topic=%s phase=%s status=%s duration_ms=%s error_type=%s",
+        trace_state.run_id,
+        trace_state.model,
+        trace_state.topic,
+        phase,
+        status,
+        record.duration_ms,
+        error_type,
+    )
 
 
 # Hàm nhỏ này dùng để cắt ngắn chuỗi log quá dài.
@@ -75,6 +137,77 @@ class ResearchRequest(BaseModel):
 # Việc gom logic vào một chỗ giúp runtime chính và /health luôn báo cùng một model.
 def _get_researcher_model_name() -> str:
     return os.environ.get("RESEARCHER_MODEL", "openai/gpt-5.4-nano")
+
+
+def _detect_degraded_reason(response_text: str) -> str | None:
+    lowered = response_text.lower()
+    degraded_markers = {
+        "quick high-level note": "quick_high_level_note",
+        "no web research": "no_web_research",
+        "no web browsing": "no_web_browsing",
+        "non-web-browsed overview": "non_web_browsed_overview",
+        "could not verify": "could_not_verify",
+        "failed to access a clean direct article page": "no_clean_direct_article",
+        "page unavailable": "page_unavailable",
+        "page not found": "page_not_found",
+        "404": "http_404",
+        "just a moment": "blocked_interstitial",
+        "access restricted": "access_restricted",
+        "access-restricted": "access_restricted",
+        "access temporarily restricted": "access_temporarily_restricted",
+        "usable direct article page": "no_usable_direct_article_page",
+        "couldn't reliably quote": "could_not_reliably_quote",
+        "couldn’t reliably quote": "could_not_reliably_quote",
+        "clean, accessible article content": "no_clean_accessible_article_content",
+        "error page": "error_page",
+        "placeholder": "placeholder_result",
+        "read-only filesystem": "read_only_filesystem",
+        "erofs": "read_only_filesystem",
+    }
+
+    for marker, reason in degraded_markers.items():
+        if marker in lowered:
+            return reason
+
+    return None
+
+
+def _infer_ingest_success(response_text: str) -> bool | None:
+    lowered = response_text.lower()
+    success_markers = [
+        "saved to database",
+        "calling ingest_financial_document now",
+        "successfully ingested",
+    ]
+    failure_markers = [
+        "api not configured",
+        "running in local mode",
+        "failed_ingest",
+    ]
+
+    if any(marker in lowered for marker in success_markers):
+        return True
+    if any(marker in lowered for marker in failure_markers):
+        return False
+    return None
+
+
+def _classify_outcome(
+    *,
+    used_browser: bool,
+    used_fallback: bool,
+    ingest_success: bool | None,
+    degraded_reason: str | None,
+) -> str:
+    if ingest_success is False:
+        return "failed_ingest"
+    if degraded_reason:
+        return "success_fallback"
+    if used_browser and not used_fallback:
+        return "success_verified"
+    if used_fallback:
+        return "success_fallback"
+    return "failed_unknown"
 
 
 # Hàm này dựng prompt đầu vào cho agent theo từng chế độ chạy.
@@ -193,6 +326,12 @@ async def run_research_agent(topic: str = None) -> str:
     """Run the research agent to generate investment advice."""
 
     query = _build_research_query(topic)
+    model_name = _get_researcher_model_name()
+    trace_state = RunTrace(
+        run_id=str(uuid.uuid4()),
+        topic=topic or "agent_choice",
+        model=model_name,
+    )
 
     if MCP_LOGGING_ENABLED:
         logger.info(
@@ -205,7 +344,6 @@ async def run_research_agent(topic: str = None) -> str:
     os.environ["AWS_REGION_NAME"] = region
     os.environ["AWS_REGION"] = region
     os.environ["AWS_DEFAULT_REGION"] = region
-    model_name = _get_researcher_model_name()
     #model = LitellmModel(model=model_name)
     #model_name = "openrouter/openai/gpt-oss-120b"
     model = LitellmModel(model=model_name)
@@ -224,31 +362,105 @@ async def run_research_agent(topic: str = None) -> str:
     # 1. Prompt bình thường + browser.
     # 2. Prompt constrained + browser.
     # 3. Prompt browserless để tránh fail toàn request.
+    response_text: str | None = None
+    used_browser = False
+    used_fallback = False
+
+    _start_phase(trace_state, "request_start")
+
     try:
-        return await _run_research_query(query, model, max_turns=15, use_browser=True)
+        _start_phase(trace_state, "browser_run")
+        used_browser = True
+        try:
+            response_text = await _run_research_query(query, model, max_turns=15, use_browser=True)
+            _end_phase(trace_state, "browser_run", status="ok")
+        except MaxTurnsExceeded:
+            _end_phase(
+                trace_state,
+                "browser_run",
+                status="max_turns",
+                error_type="MaxTurnsExceeded",
+            )
+            raise
+        except Exception as exc:
+            _end_phase(
+                trace_state,
+                "browser_run",
+                status="error",
+                error_type=type(exc).__name__,
+            )
+            raise
     except MaxTurnsExceeded:
         fallback_query = _build_research_query(topic=topic, constrained=True)
         logger.warning(
             "Default research prompt exceeded max turns; retrying with constrained fallback query."
         )
+        used_fallback = True
         try:
-            return await _run_research_query(
-                fallback_query,
-                model,
-                max_turns=12,
-                use_browser=True,
-            )
+            _start_phase(trace_state, "constrained_browser_run")
+            try:
+                response_text = await _run_research_query(
+                    fallback_query,
+                    model,
+                    max_turns=12,
+                    use_browser=True,
+                )
+                _end_phase(trace_state, "constrained_browser_run", status="ok")
+            except MaxTurnsExceeded:
+                _end_phase(
+                    trace_state,
+                    "constrained_browser_run",
+                    status="max_turns",
+                    error_type="MaxTurnsExceeded",
+                )
+                raise
+            except Exception as exc:
+                _end_phase(
+                    trace_state,
+                    "constrained_browser_run",
+                    status="error",
+                    error_type=type(exc).__name__,
+                )
+                raise
         except MaxTurnsExceeded:
             logger.warning(
                 "Browser-based fallback also exceeded max turns; retrying without browser access."
             )
             browserless_query = _build_browserless_fallback_query(topic)
-            return await _run_research_query(
+            _start_phase(trace_state, "browserless_fallback_run")
+            response_text = await _run_research_query(
                 browserless_query,
                 model,
                 max_turns=6,
                 use_browser=False,
             )
+            _end_phase(trace_state, "browserless_fallback_run", status="ok")
+        except Exception:
+            raise
+    finally:
+        if response_text:
+            trace_state.degraded_reason = _detect_degraded_reason(response_text)
+            trace_state.ingest_success = _infer_ingest_success(response_text)
+            trace_state.outcome = _classify_outcome(
+                used_browser=used_browser,
+                used_fallback=used_fallback,
+                ingest_success=trace_state.ingest_success,
+                degraded_reason=trace_state.degraded_reason,
+            )
+        _end_phase(trace_state, "request_start", status="ok" if response_text else "error")
+        total_duration_ms = trace_state.phases["request_start"].duration_ms or 0
+        logger.info(
+            "research_run request_end run_id=%s model=%s topic=%s outcome=%s ingest_success=%s degraded_reason=%s total_duration_ms=%s",
+            trace_state.run_id,
+            trace_state.model,
+            trace_state.topic,
+            trace_state.outcome,
+            trace_state.ingest_success,
+            trace_state.degraded_reason,
+            total_duration_ms,
+        )
+
+    return response_text
 
 
 # Endpoint gốc chỉ dùng như health check tối giản.

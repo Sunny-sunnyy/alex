@@ -108,6 +108,40 @@ Observed outcome after the fix:
 - the known false-positive `success_verified` case was removed
 - terminal output is now reliable enough to finish `Task 0.5` before moving to server-side observability
 
+Task 1 execution update:
+
+- first server-side structured observability slice is now implemented in `backend/researcher/server.py`
+- added:
+  - request-scoped `run_id`
+  - `phase_start`
+  - `phase_end`
+  - `request_end`
+  - degraded reason detection
+  - basic ingest success inference
+  - normalized runtime outcome logging
+
+Deployed verification for this slice:
+
+- built and pushed a new image
+- updated Lambda directly with AWS CLI
+- final verified image tag: `deploy-1783246453`
+
+Verification commands:
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run python -m py_compile server.py`
+- `uv run backend/researcher/test_research.py "Tesla competitive advantages"`
+- `aws logs tail /aws/lambda/alex-researcher --since 2m --region ap-southeast-1 | rg "research_run"`
+
+Observed result:
+
+- deployed request still returned `200 OK`
+- CloudWatch showed one shared `run_id`
+- CloudWatch showed:
+  - `phase_start`
+  - `phase_end`
+  - `request_end`
+- `request_end total_duration_ms` was corrected to match the outer request duration rather than double-count nested phases
+
 ## Global Constraints
 
 - Fix bug instability before benchmarking models.

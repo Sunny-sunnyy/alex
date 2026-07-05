@@ -426,3 +426,91 @@ Important remaining truth:
 - this does **not** mean browser-based verified success is now common
 - it means the terminal summary is now less misleading
 - the next task should still be structured observability in `server.py`
+
+## Task 1 started and first observability slice verified
+
+After the user asked to continue immediately into `Task 1`, I implemented the first server-side observability slice in:
+
+- `backend/researcher/server.py`
+
+### What was added
+
+- `RunTrace` and `PhaseRecord` dataclasses
+- one `run_id` per `/research` request
+- structured log events for:
+  - `phase_start`
+  - `phase_end`
+  - `request_end`
+- degraded reason detection in runtime
+- basic ingest success inference from response text
+- normalized outcome emission in CloudWatch:
+  - `success_verified`
+  - `success_fallback`
+  - `failed_ingest`
+  - `failed_unknown`
+
+### Important implementation note
+
+The `/research` API contract was **not** changed.
+
+The endpoint still returns the same response body shape as before; only internal runtime logging was added.
+
+### Bug found during Task 1 implementation
+
+The first implementation mistakenly computed:
+
+- `total_duration_ms`
+
+by summing all phase durations, which double-counted the request because:
+
+- `request_start` already wrapped the whole request
+- child phases were nested inside it
+
+I fixed that by making:
+
+- `total_duration_ms = request_start.duration_ms`
+
+### Deployment path used
+
+As before, `uv run deploy.py` was not used for the final deploy because Terraform AWS provider instability remains.
+
+I deployed via:
+
+1. build Docker image
+2. push to ECR
+3. update Lambda image directly with AWS CLI
+
+Final deployed image tag for this Task 1 slice:
+
+- `deploy-1783246453`
+
+### Verification commands run
+
+- local syntax check:
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python -m py_compile server.py`
+- deployed runtime:
+  - `curl -m 30 -sS https://u7lbfi3ovnkij7hwffzv7ehqxm0kzvbo.lambda-url.ap-southeast-1.on.aws/health`
+  - `uv run test_research.py "Tesla competitive advantages"`
+  - `aws logs tail /aws/lambda/alex-researcher --since 2m --region ap-southeast-1 | rg "research_run"`
+
+### What the verification proved
+
+The deployed request still returned:
+
+- HTTP `200 OK`
+- terminal `RUN SUMMARY`
+
+CloudWatch now clearly shows:
+
+- `phase_start`
+- `phase_end`
+- `request_end`
+- a shared `run_id`
+
+Verified example:
+
+- `phase=browser_run status=ok duration_ms=76694`
+- `phase=request_start status=ok duration_ms=76694`
+- `request_end outcome=success_fallback ingest_success=True degraded_reason=page_unavailable total_duration_ms=76694`
+
+This confirms the first Task 1 observability slice is working end-to-end.

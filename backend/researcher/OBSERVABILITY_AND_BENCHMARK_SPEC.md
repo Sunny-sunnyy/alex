@@ -132,6 +132,39 @@ Ghi chú:
 - `success_fallback` dùng cho run phải đi qua fallback nhưng vẫn lưu được kết quả
 - placeholder note hoặc degraded content cần được nhận diện rõ để không bị hiểu nhầm là success chất lượng cao
 
+### Trạng thái hiện tại của structured logs
+
+Slice đầu tiên của structured observability này đã được triển khai và verify trên deployed Lambda.
+
+Hiện đã có các event:
+
+- `phase_start`
+- `phase_end`
+- `request_end`
+
+với các field chính:
+
+- `run_id`
+- `model`
+- `topic`
+- `phase`
+- `status`
+- `duration_ms`
+- `outcome`
+- `ingest_success`
+- `degraded_reason`
+
+Đã verify bằng CloudWatch rằng một run thực tế có cùng `run_id` xuyên suốt từ:
+
+- `request_start`
+- `browser_run`
+- `request_end`
+
+Ghi chú:
+
+- `total_duration_ms` đã được sửa để dùng duration của `request_start`
+- tránh double-count nested phase durations
+
 ## 2. Terminal-friendly output
 
 `backend/researcher/test_research.py` sẽ được cải tiến để hiển thị rõ hơn.

@@ -137,20 +137,19 @@ Use exactly this 5-topic set for the first model benchmark:
 
 Do not substitute topics in the first benchmark pass. The point is to compare models against the same unstable browser/source conditions.
 
-## Pending Work
+## Benchmark Result (2026-07-06)
 
-The remaining planned work is model benchmarking:
+The benchmark compared two models on the fixed 5-topic set under identical browser/runtime constraints:
 
-- Compare `openai/gpt-5.4-nano` against `openrouter/openai/gpt-oss-120b`.
-- Benchmark only on deployed Lambda runtime, not local-only runs.
-- Keep the immediate-snapshot browser strategy unchanged during the benchmark.
-- Keep verified-web-only enforcement unchanged during the benchmark.
-- Record both terminal summaries and CloudWatch evidence.
+- `openai/gpt-5.4-nano` (Model A)
+- `openrouter/openai/gpt-oss-120b` (Model B)
 
-Detailed handoff docs:
+**Recommended default: `openai/gpt-5.4-nano`**
 
-- Spec: `docs/superpowers/specs/2026-07-06-researcher-model-benchmark-design.md`
-- Plan: `docs/superpowers/plans/2026-07-06-researcher-model-benchmark.md`
+Reason: Model A is 4.2x faster (median 26.9s vs 112.9s), verified more topics (2/5 vs 1/5), and fails cleanly with designed 500s rather than hard timeouts (0 vs 3/5). Model B's sole advantage — capturing an AP News article for the first time — does not justify its 60% timeout rate at the current Lambda 300s budget. The browser/source instability affects both models, but Model A handles it more gracefully and predictably.
+
+Full benchmark results and CloudWatch evidence are recorded in:
+`docs/superpowers/plans/2026-07-06-researcher-model-benchmark.md`
 
 ## Key Files
 

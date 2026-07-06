@@ -763,27 +763,32 @@ Expected:
 
 | Topic | HTTP Result | Terminal Duration (ms) | Terminal Outcome | Degraded Signal | CloudWatch Outcome | Ingest Success | Browser Statuses | Snapshot URL | Notes |
 |-------|-------------|------------------------|------------------|-----------------|-------------------|----------------|------------------|--------------|-------|
-| Tesla competitive advantages | | | | | | | | | |
-| Microsoft cloud revenue growth | | | | | | | | | |
-| NVIDIA AI datacenter demand | | | | | | | | | |
-| Amazon advertising growth | | | | | | | | | |
-| Apple services revenue growth | | | | | | | | | |
+| Tesla competitive advantages | 500 | 9459 | n/a on 500 | verified_web_content_not_obtained | failed_browser | None | browser_run=ok | none | Clean designed 500; run_id=6ca1b673 |
+| Microsoft cloud revenue growth | 500 | 65975 | n/a on 500 | verified_web_content_not_obtained | failed_browser | None | browser_run=ok | none | Clean designed 500; run_id=6e1dc72a |
+| NVIDIA AI datacenter demand | 500 | 24091 | n/a on 500 | read_only_filesystem | failed_browser | None | browser_run=ok | none | Filesystem error blocked browser; run_id=15554df2 |
+| Amazon advertising growth | 200 | 29415 | success_verified | none | success_verified | True | browser_run=article_captured | https://www.investopedia.com/how-amazon-makes-money-4587523 | Investopedia article; run_id=cb2de870 |
+| Apple services revenue growth | 200 | 24303 | success_verified | none | success_verified | True | browser_run=article_captured | https://www.investopedia.com/apple-stock-dives-as-price-hikes-trigger-concerns-about-rising-memory-costs-aapl-update-12006588 | Investopedia article; run_id=f870b762 |
 
 ### Model B: `openrouter/openai/gpt-oss-120b`
 
 | Topic | HTTP Result | Terminal Duration (ms) | Terminal Outcome | Degraded Signal | CloudWatch Outcome | Ingest Success | Browser Statuses | Snapshot URL | Notes |
 |-------|-------------|------------------------|------------------|-----------------|-------------------|----------------|------------------|--------------|-------|
-| Tesla competitive advantages | | | | | | | | | |
-| Microsoft cloud revenue growth | | | | | | | | | |
-| NVIDIA AI datacenter demand | | | | | | | | | |
-| Amazon advertising growth | | | | | | | | | |
-| Apple services revenue growth | | | | | | | | | |
+| Tesla competitive advantages | Timeout | n/a | timeout | n/a | No request_end (Lambda 300s timeout) | n/a | browser_run started, no phase_end | none | Lambda likely hit 300s timeout; run_id=2d1df7bb |
+| Microsoft cloud revenue growth | 200 | 112972 | success_verified | none | success_verified | True | browser_run=article_captured | https://apnews.com/article/microsoft-2a103bc541f2d0f38c254271bad3b672 | First AP News success ever! run_id=d378fddf |
+| NVIDIA AI datacenter demand | 500 | 6071 | n/a on 500 | ModelBehaviorError | failed_browser | None | browser_run=error | none | Tool browser_search not found; run_id=c0c860aa |
+| Amazon advertising growth | Timeout | n/a | timeout | n/a | No request_end (Lambda 300s timeout) | n/a | browser_run started, no phase_end | none | Lambda likely hit 300s timeout; run_id=829a828c |
+| Apple services revenue growth | Timeout | n/a | timeout | n/a | No request_end (Lambda 300s timeout) | n/a | browser_run started, no phase_end | none | Lambda likely hit 300s timeout; run_id=4b11e632 |
 
 ### Comparison Summary
 
-- Faster model:
-- More verified model:
-- Cleaner-failing model:
-- Lower max-turn model:
-- Recommended default model:
+- Faster model: **`openai/gpt-5.4-nano`** — median successful duration 26,859ms vs 112,972ms (4.2x faster).
+- More verified model: **`openai/gpt-5.4-nano`** — 2/5 verified successes (Amazon, Apple) vs 1/5 (Microsoft).
+- Cleaner-failing model: **`openai/gpt-5.4-nano`** — 3 clean designed 500s (verified-web gate) with 0 timeouts. Model B had 3 timeouts that returned no result at all, which is worse than a clean 500.
+- Lower max-turn model: **Equal** — neither model hit max_turns in this benchmark.
+- Recommended default model: **`openai/gpt-5.4-nano`**
+
 - Reasoning:
+  1. Model A is 4.2x faster on successful runs and consistently returns results (or clean 500s) within 66 seconds. Model B's successful run took ~113 seconds and its timeouts consumed the full 300-second Lambda budget with no result.
+  2. Model A's failure mode is predictable: it returns a clean 500 with `verified_web_content_not_obtained`. Model B's failures are split between tool-compatibility errors (`browser_search not found`) and hard timeouts that waste Lambda resources.
+  3. Model B's one notable advantage is capturing an AP News article (the first ever in this runtime). However, this single success does not justify the 3/5 timeout rate. The AP News success may reflect the model's different browsing behavior rather than the source strategy.
+  4. For production use at Guide 4 Step 4, `openai/gpt-5.4-nano` is the safer default: faster, more predictable, and more resource-efficient. The browser/source instability affects both models, but Model A handles it more gracefully.

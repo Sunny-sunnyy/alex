@@ -65,7 +65,13 @@ Trong các phiên debug gần đây, do Terraform provider có lúc lỗi, team 
 2. push ECR
 3. `aws lambda update-function-code --image-uri ...`
 
-Hiện tại `uv run deploy.py` đã deploy lại được theo flow chuẩn.
+Hiện tại `uv run deploy.py` đã deploy lại được theo flow chuẩn trong mot so phien (Terraform AWS provider thinh thoang van crash "Plugin did not respond").
+
+Khi Terraform fail, fallback path la:
+
+1. build image local
+2. push ECR
+3. `aws lambda update-function-code --image-uri ...`
 
 ## Trạng thái thực tế hiện tại
 
@@ -88,42 +94,58 @@ Hiện tại Researcher đã:
   - fallback note không còn được ingest vào S3 Vectors
   - agent bị cấm fabricate article URL và phải khám phá URL qua browser/search trước
   - `browser_run` chính hiện dùng `max_turns=30`
-  - đã thử runtime experiment bỏ `--single-process` khỏi Playwright launch args
-  - prompt đã được siết thêm `immediate-snapshot` constraint để giảm drift window
-  - `browser_run` status giờ phân loại `article_captured` / `page_drifted` / `ok` thay vì chỉ `ok`
+  - đã thử runtime experiment bỏ `--single-process` khỏi Playwright launch args (inconclusive — không tạo ra success_verified rõ rệt)
+  - prompt đã được siết thêm `immediate-snapshot` constraint để giảm drift window giữa navigate và snapshot
+  - source limit rõ ràng: tối đa 3 source (Investopedia -> AP News -> CNN Business), mỗi source snapshot ngay sau navigate
+  - `browser_run` status giờ phân loại `article_captured` / `page_drifted` / `ok` / `max_turns` / `error`
   - có `snapshot_page_url` log trong CloudWatch để truy vết URL thực tế khi snapshot
-  - đã chứng minh được `success_verified` đầu tiên (NVIDIA AI datacenter demand, Investopedia article 2026-07-06)
+  - có `_detect_drifted_snapshot()` và `_extract_snapshot_url()` helper trong `server.py`
+  - đã chứng minh được `success_verified` reproducible (NVIDIA AI datacenter demand, 2/2 pass 2026-07-06, Investopedia articles)
 
 Nhưng vẫn còn hạn chế:
 
-- browser path trong Lambda vẫn chưa ổn định hoàn toàn (1/5 benchmark đạt `success_verified`, 4/5 vẫn fail);
-- sau verified-web-only gate, đa số benchmark topic vẫn fail `500`;
-- browser vẫn dễ rơi vào `about:blank`, `about:srcdoc`, client-storage/interstitial, hoặc ad-tech paths trước khi có article body sạch;
-- browser có thể `status=ok` nhưng vẫn không lấy được article content usable.
+- browser path trong Lambda vẫn chưa ổn định hoàn toàn (1/5 benchmark reproducible `success_verified`, 4/5 vẫn fail verified-web-only gate);
+- NVIDIA la topic duy nhat hien tai pass duoc browser-verified thanh cong; cac topic khac (Tesla, Microsoft, Amazon, Apple) van fail;
+- browser vẫn dễ rơi vào `about:blank`, `about:srcdoc`, client-storage/interstitial, hoặc ad-tech paths truoc khi co article body sạch;
+- browser có thể `status=ok` nhưng vẫn không lấy được article content usable;
+- immediate-snapshot strategy giup giam drift window nhung chua giai quyet duoc moi truong hop.
 
 ## Trạng thái verify hiện tại
 
-Các run live gần nhất xác nhận:
+Benchmark 5-topic ngay 2026-07-06 (deploy-1783329777, immediate-snapshot strategy):
 
+| Topic | `browser_run` status | Outcome | Ghi chu |
+|-------|---------------------|---------|---------|
+| Tesla competitive advantages | `ok` | failed (page_unavailable) | browser hoan thanh nhung khong co article |
+| Microsoft cloud revenue growth | `ok` | failed (no clean source URL) | browser hoan thanh nhung khong co article |
+| **NVIDIA AI datacenter demand** | **`article_captured`** | **success_verified** | Investopedia article, reproducible (2/2) |
+| Amazon advertising growth | `ok` | failed (page_not_found) | duration 142s, browser struggle |
+| Apple services revenue growth | `ok` | failed (no clean source URL) | browser hoan thanh nhung khong co article |
+
+Cac run live gan nhat xac nhan:
+
+- `NVIDIA AI datacenter demand`
+  - **success_verified** reproducible (2 lan, 2026-07-06)
+  - Lan 1: Investopedia article `nvidia-is-telling-chinese-customers...nvda-11996472`
+  - Lan 2: Investopedia article `nvidia-reports-earnings-wednesday-5-key-things...nvda-11978014`
+  - Ca 2 lan deu `browser_run status=article_captured`
+  - Day la lan dau tien browser path chung minh duoc verified web content extraction reproducible
 - `Microsoft cloud revenue growth`
-  - từng fail với:
+  - tung fail voi:
     - `Verified web content not obtained: page_not_found.`
-  - sau anti-fabrication prompt fail với:
+  - sau anti-fabrication prompt fail voi:
     - `Verified web content not obtained: ingest did not record a clean source URL.`
 - `Tesla competitive advantages`
-  - fail với:
+  - fail voi:
     - `Verified web content not obtained: page_unavailable.`
-- `NVIDIA AI datacenter demand`
-  - **success_verified** ngày 2026-07-06
-  - snapshot captured Investopedia article: `nvidia-is-telling-chinese-customers...nvda-11996472`
-  - `browser_run status=article_captured`
-  - đây là lần đầu tiên browser path chứng minh được verified web content extraction
 
 Điều này có nghĩa là:
 
 - vector store sạch hơn trước vì fallback note không còn bị ingest
-- browser article retrieval trên Lambda headless runtime đã có bằng chứng thành công đầu tiên (NVIDIA/Investopedia)
-- nhưng vẫn chưa đủ ổn định để gọi là fully proven (1/5, chưa reproducible)
+- browser article retrieval trên Lambda headless runtime đã có bằng chứng thành công reproducible (NVIDIA/Investopedia, 2/2)
+- immediate-snapshot strategy đã giúp capture được article content trước khi JavaScript redirects gây drift
+- nhưng vẫn chưa đủ ổn định để gọi là fully proven (chi 1/5 topic, 1/3 source type)
+- cac topic khac va source khac (AP News, CNN Business) van chua pass duoc verified-web gate
 
 ## Các file trong folder
 
@@ -140,7 +162,9 @@ Nhiệm vụ:
 - dựng model runtime;
 - chạy Researcher agent;
 - xử lý browser run, constrained retry, và verified-web-only gate;
-- ghi structured observability logs;
+- phát hiện drift (`_detect_drifted_snapshot`) và trích xuất source URL (`_extract_snapshot_url`);
+- phân loại `browser_run` status: `article_captured` / `page_drifted` / `ok` / `max_turns` / `error`;
+- ghi structured observability logs (gồm `snapshot_page_url`, `run_id`, phase tracking);
 - expose các endpoint:
   - `/`
   - `/health`
@@ -159,16 +183,17 @@ File này chứa prompt và instruction của agent.
 Nhiệm vụ:
 
 - quy định agent browse như thế nào;
-- giới hạn số trang;
+- giới hạn số trang va so source (toi da 3: Investopedia -> AP News -> CNN Business);
+- ap dung CRITICAL SNAPSHOT RULE: snapshot ngay sau navigate, khong co hanh dong trung gian;
 - ưu tiên nguồn nào;
 - cấm fabricate article URL;
 - xác định prompt mặc định khi không có topic.
 
 Hiện tại source preference được định hướng theo:
 
-- `Investopedia`
-- `AP News`
-- `CNN Business`
+- `Investopedia` (source pass duoc verified-web gate)
+- `AP News` (chua pass)
+- `CNN Business` (chua pass)
 - `Reuters` chỉ là nguồn phụ nếu direct article page load sạch
 
 ### Tool kết nối ingest

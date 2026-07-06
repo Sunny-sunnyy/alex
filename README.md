@@ -912,6 +912,533 @@ Khi sang Day 5, các thông tin từ Day 4 sẽ còn được dùng tiếp:
 
 ---
 
+# Day 5 - Researcher Agent: Browser Research, Container Deploy, And Verified Ingest
+
+## Phạm vi Day 5
+
+Day 5 trong repo này bao gồm:
+
+- `tai_lieu/week3/day5_summary.md`
+- `guides/4_researcher.md`
+- `backend/researcher`
+- `terraform/4_researcher`
+- `backend/ingest`
+- `terraform/3_ingestion`
+
+Đây là ngày nối trực tiếp từ ingest pipeline của Day 4 sang một AI agent tự động: Researcher Agent.
+
+Mục tiêu kỹ thuật của Day 5:
+
+1. hiểu Researcher như một data pipeline nhỏ theo tư duy ETL;
+2. cấu hình model/provider cho OpenAI Agents SDK qua LiteLLM;
+3. đóng gói Researcher bằng Docker với Playwright MCP và Chromium;
+4. deploy image lên ECR và chạy service bằng AWS Lambda container image;
+5. test end-to-end chuỗi Research -> Ingest -> Vector Search;
+6. thêm scheduler tùy chọn bằng EventBridge + Lambda proxy;
+7. ghi nhận các giới hạn thực tế của browser research trong Lambda.
+
+## Những file đã được dùng để lấy ngữ cảnh
+
+Các file chính:
+
+- `gameplan.md`
+- `guides/architecture.md`
+- `guides/agent_architecture.md`
+- `guides/4_researcher.md`
+- `tai_lieu/week3/day5_summary.md`
+- `backend/researcher/README.md`
+- `backend/researcher/server.py`
+- `backend/researcher/context.py`
+- `backend/researcher/tools.py`
+- `backend/researcher/mcp_servers.py`
+- `backend/researcher/test_research.py`
+- `backend/researcher/deploy.py`
+- `backend/researcher/Dockerfile`
+- `terraform/4_researcher/main.tf`
+- `terraform/4_researcher/variables.tf`
+- `terraform/4_researcher/outputs.tf`
+
+Vai trò của từng nhóm file:
+
+- `guides/4_researcher.md`: hướng dẫn chính của Day 5, nhưng vẫn còn nhiều đoạn lịch sử nhắc App Runner/Bedrock.
+- `tai_lieu/week3/day5_summary.md`: tóm tắt lý thuyết và thao tác từ các bài 83-88.
+- `backend/researcher`: source code chạy thật của Researcher.
+- `terraform/4_researcher`: hạ tầng chạy thật của Researcher trong repo hiện tại.
+- `backend/ingest` và `terraform/3_ingestion`: endpoint nhận kết quả research rồi lưu vào vector knowledge base.
+
+## Day 5 - Phần 1: Data Engineering Và Vai Trò Của Researcher
+
+### Mục tiêu
+
+Hiểu Researcher không chỉ là một chatbot, mà là một mắt xích trong data pipeline.
+
+Luồng tư duy theo ETL:
+
+1. **Extract**: Researcher dùng Playwright MCP để lấy thông tin từ web.
+2. **Transform**: LLM tóm tắt và biến nội dung thô thành investment note ngắn gọn.
+3. **Load**: tool `ingest_financial_document` gửi kết quả sang ingest API của Day 4.
+
+Nếu map vào Medallion Architecture:
+
+- Bronze: nội dung web thô, HTML/text từ các trang tài chính.
+- Silver: nội dung đã được agent tóm tắt, lọc noise và chuẩn hóa.
+- Gold: document đã được embed và lưu vào S3 Vectors, sẵn sàng cho các agent khác truy vấn.
+
+### Ý nghĩa học thuật
+
+Điểm quan trọng của Day 5 là chuyển từ "tự tay ingest tài liệu mẫu" sang "agent tự tạo dữ liệu mới rồi tự ingest".
+
+Điều này biến knowledge base của Alex thành một hệ thống có thể tự cập nhật, thay vì chỉ là một vector store tĩnh.
+
+## Day 5 - Phần 2: Model, OpenAI Agents SDK, LiteLLM Và Tool Calling
+
+### Mục tiêu
+
+Hiểu cách Researcher dùng OpenAI Agents SDK để điều phối:
+
+- model;
+- browser MCP tools;
+- custom ingest tool.
+
+Trong course narrative, Day 5 nhắc nhiều đến Bedrock, Nova Pro và OpenAI OSS models.
+
+Trong implementation hiện tại của repo:
+
+- runtime chính đang dùng `openai/gpt-5.4-nano`;
+- model được chọn bằng biến `RESEARCHER_MODEL`;
+- `LitellmModel` là lớp adapter để OpenAI Agents SDK gọi provider tương ứng;
+- `OPENAI_API_KEY` vẫn cần thiết cho OpenAI runtime/tracing;
+- `OPENROUTER_API_KEY` đã được Terraform wiring để benchmark `openrouter/openai/gpt-oss-120b` ở bước tiếp theo.
+
+### Code liên quan
+
+Trong `server.py`, model được đọc qua helper:
+
+```python
+def _get_researcher_model_name() -> str:
+    return os.environ.get("RESEARCHER_MODEL", "openai/gpt-5.4-nano")
+```
+
+Trong `tools.py`, tool chính là:
+
+```python
+@function_tool
+def ingest_financial_document(topic: str, analysis: str, source_url: str) -> Dict[str, Any]:
+    ...
+```
+
+Tool này không chỉ gọi ingest API. Nó còn enforce verified-web-only behavior:
+
+- `source_url` phải sạch;
+- domain phải thuộc allowlist;
+- analysis không được là fallback/general knowledge;
+- nếu không đạt điều kiện thì tool trả failure và không ghi vào vector store.
+
+## Day 5 - Phần 3: Docker, Playwright MCP, ECR Và Lambda Function URL
+
+### Mục tiêu
+
+Đóng gói Researcher thành container image có đủ môi trường để chạy:
+
+- Python 3.12;
+- `uv`;
+- FastAPI/Uvicorn;
+- Node.js;
+- `@playwright/mcp`;
+- Chromium headless;
+- Lambda Web Adapter.
+
+### Implementation thực tế của repo
+
+Guide vẫn còn nhiều đoạn mô tả App Runner, nhưng source of truth hiện tại là:
+
+- AWS Lambda container image;
+- Lambda Function URL;
+- ECR;
+- Terraform folder `terraform/4_researcher`;
+- deploy script `backend/researcher/deploy.py`.
+
+Không nên debug theo App Runner logs nếu đang chạy implementation hiện tại. Cần dùng:
+
+- Lambda logs: `/aws/lambda/alex-researcher`;
+- Lambda Function URL output: `terraform output researcher_url`;
+- ECR image URI trong `researcher.auto.tfvars.json`.
+
+### Bài toán chicken-and-egg
+
+Terraform cần image URI để tạo Lambda, nhưng image URI chỉ có sau khi:
+
+1. ECR repo tồn tại;
+2. Docker image được build;
+3. image được push lên ECR.
+
+Vì vậy deploy flow thực tế là:
+
+1. Terraform tạo ECR prerequisites;
+2. `deploy.py` build image `linux/amd64`;
+3. `deploy.py` push image lên ECR;
+4. `deploy.py` ghi image URI vào `researcher.auto.tfvars.json`;
+5. Terraform apply Lambda + Function URL;
+6. script chờ Lambda active.
+
+## Day 5 - Phần 4: Browser Research Và Immediate-Snapshot Strategy
+
+### Vấn đề thực tế
+
+Browser research trong Lambda không ổn định tuyệt đối.
+
+Các failure mode đã gặp hoặc cần nhớ:
+
+- captcha/interstitial;
+- ad/tracker redirect;
+- `about:blank`;
+- `about:srcdoc`;
+- client-storage/Optimizely pages;
+- max turns exceeded;
+- page technically opens nhưng không có article body usable.
+
+### Fix hiện tại
+
+Repo hiện đã áp dụng immediate-snapshot strategy:
+
+1. agent discover article URL thật;
+2. gọi `browser_navigate`;
+3. ngay lập tức gọi `browser_snapshot`;
+4. không click/scroll/type ở giữa;
+5. thử tối đa 3 source: Investopedia -> AP News -> CNN Business;
+6. nếu cả 3 fail thì dừng và báo không có verified web content.
+
+Các helper runtime quan trọng trong `server.py`:
+
+- `_detect_drifted_snapshot()`;
+- `_extract_snapshot_url()`;
+- `_classify_outcome()`;
+- `_get_verified_ingest_observation()`.
+
+Browser phase status hiện có:
+
+- `article_captured`;
+- `page_drifted`;
+- `ok`;
+- `max_turns`;
+- `error`.
+
+### Bằng chứng verify quan trọng
+
+Benchmark gần nhất cho thấy:
+
+- `NVIDIA AI datacenter demand` đã có `success_verified` reproducible 2/2 ngày 2026-07-06;
+- cả 2 run dùng Investopedia article;
+- cả 2 run có `browser_run status=article_captured`;
+- 4 topic còn lại vẫn fail verified-web gate như thiết kế.
+
+Kết luận đúng:
+
+- immediate-snapshot là improvement đã được chứng minh;
+- chưa phải complete fix;
+- Investopedia là source duy nhất đã proven;
+- AP News và CNN Business vẫn chưa proven.
+
+## Day 5 - Phần 5: Verified-Web-Only Ingest Contract
+
+### Mục tiêu
+
+Giữ vector store sạch hơn bằng cách không ingest fallback notes.
+
+Contract hiện tại:
+
+- chỉ ingest nếu có web article content thật;
+- phải có clean `Source URL: https://...`;
+- `ingest_financial_document` phải ghi observation thành công theo `run_id`;
+- nếu không có verified web content, `/research` trả `500`;
+- `500` trong trường hợp này là clean failure, không phải tự động là bug.
+
+### Ý nghĩa khi test
+
+Không được hiểu mọi HTTP 500 là thất bại hệ thống.
+
+Nếu detail là:
+
+```text
+Verified web content not obtained...
+```
+
+thì đó là behavior đúng để tránh lưu dữ liệu không đáng tin vào S3 Vectors.
+
+## Day 5 - Phần 6: Observability Và Cách Đọc Evidence
+
+### Terminal summary
+
+`test_research.py` hiện in:
+
+- `Model`;
+- `Topic`;
+- `Request Duration (ms)`;
+- `Outcome`;
+- `Degraded Signal`;
+- `Ingest Status`.
+
+Terminal output giúp nhìn nhanh, nhưng chỉ là heuristic.
+
+### CloudWatch source of truth
+
+CloudWatch logs mới là evidence chính.
+
+Các event quan trọng:
+
+- `research_run phase_start`;
+- `research_run phase_end`;
+- `research_run snapshot_page_url`;
+- `research_run request_end`;
+- `research_ingest`.
+
+Các field quan trọng:
+
+- `run_id`;
+- `model`;
+- `topic`;
+- `phase`;
+- `status`;
+- `duration_ms`;
+- `outcome`;
+- `ingest_success`;
+- `degraded_reason`;
+- `total_duration_ms`;
+- `source_url`;
+- `document_id`.
+
+Command lọc evidence:
+
+```bash
+aws logs tail /aws/lambda/alex-researcher --since 20m --region ap-southeast-1 | rg "research_run|research_ingest|snapshot_page_url"
+```
+
+## Day 5 - Phần 7: Scheduler Tùy Chọn
+
+### Mục tiêu
+
+Tự động hóa Researcher để chạy theo lịch thay vì gọi thủ công.
+
+Course narrative nói scheduler chạy mỗi 2 giờ. Implementation hiện tại có thể đã được chỉnh thành 12 giờ trong Terraform local diff, nhưng scheduler không phải trọng tâm của benchmark model hiện tại.
+
+Kiến trúc scheduler:
+
+1. EventBridge Scheduler trigger theo `rate(...)`.
+2. EventBridge invoke Lambda scheduler.
+3. Lambda scheduler gọi Researcher Function URL.
+4. Researcher chạy `/research/auto`.
+
+Lý do cần Lambda scheduler trung gian:
+
+- EventBridge API Destinations có timeout ngắn;
+- Researcher có thể mất 30-180 giây;
+- Lambda scheduler có thể chờ lâu hơn và ghi log rõ hơn.
+
+## Hạ tầng / code / config đã tạo hoặc đã sửa trong Day 5
+
+Các thành phần chính đã dùng hoặc hoàn thiện:
+
+- `backend/researcher/server.py`
+- `backend/researcher/context.py`
+- `backend/researcher/tools.py`
+- `backend/researcher/mcp_servers.py`
+- `backend/researcher/test_research.py`
+- `backend/researcher/deploy.py`
+- `backend/researcher/Dockerfile`
+- `terraform/4_researcher/main.tf`
+- `terraform/4_researcher/variables.tf`
+- `terraform/4_researcher/outputs.tf`
+- `backend/researcher/README.md`
+- `docs/superpowers/specs/2026-07-06-researcher-model-benchmark-design.md`
+- `docs/superpowers/plans/2026-07-06-researcher-model-benchmark.md`
+
+Docs đã được consolidate:
+
+- `backend/researcher/README.md` là source of truth cho Researcher hiện tại;
+- old incident/spec/plan markdown files đã bị xóa để tránh context drift;
+- spec/plan mới tập trung vào benchmark `gpt-5.4-nano` vs `gpt-oss-120b`.
+
+## Giá trị output quan trọng cần lưu cho ngày sau
+
+Cần nhớ hoặc xác minh:
+
+- active deployed image trước benchmark: `deploy-1783329777`;
+- latest docs commit: `57d0bcd Update specs, plans researcher for gpt oss 120b`;
+- active default model: `openai/gpt-5.4-nano`;
+- benchmark candidate: `openrouter/openai/gpt-oss-120b`;
+- researcher URL lấy bằng `terraform output researcher_url`;
+- ECR URL lấy bằng `terraform output ecr_repository_url`;
+- Lambda function name: `alex-researcher`;
+- CloudWatch log group: `/aws/lambda/alex-researcher`.
+
+Không được in secret khi kiểm tra:
+
+- `.env`;
+- `terraform/4_researcher/terraform.tfvars`;
+- full Lambda environment variables.
+
+Safe model check:
+
+```bash
+aws lambda get-function-configuration \
+  --function-name alex-researcher \
+  --region ap-southeast-1 \
+  --query 'Environment.Variables.RESEARCHER_MODEL' \
+  --output text
+```
+
+## Lỗi và bẫy quan trọng của Day 5
+
+### Lỗi 1: Docker không chạy hoặc build sai platform
+
+- triệu chứng:
+  - `uv run deploy.py` fail khi build image;
+  - container chạy được local nhưng fail trên Lambda;
+  - lỗi kiến trúc CPU hoặc exit code khó hiểu.
+- root cause:
+  - Docker Desktop chưa chạy;
+  - image không build cho `linux/amd64`.
+- cách fix:
+  - bật Docker Desktop;
+  - kiểm tra `docker ps`;
+  - đảm bảo deploy script dùng `docker buildx build --platform linux/amd64`.
+
+### Lỗi 2: Terraform AWS provider crash khi deploy
+
+- triệu chứng:
+  - `uv run deploy.py` build/push image xong nhưng Terraform báo `Plugin did not respond`.
+- root cause:
+  - provider crash/instability, không phải nhất thiết do app code.
+- cách fix:
+  - lấy image URI đã push;
+  - update Lambda trực tiếp:
+    ```bash
+    aws lambda update-function-code \
+      --function-name alex-researcher \
+      --image-uri <ecr-image-uri> \
+      --region ap-southeast-1
+    ```
+  - chờ Lambda `Active` và `Successful`.
+
+### Lỗi 3: Browser path bị interstitial hoặc page drift
+
+- triệu chứng:
+  - `page_not_found`;
+  - `page_unavailable`;
+  - `about:blank`;
+  - `about:srcdoc`;
+  - `client-storage`;
+  - không có clean `Source URL`.
+- root cause:
+  - site tài chính redirect/blank/interstitial quá nhanh trong Lambda headless runtime.
+- cách fix hiện tại:
+  - immediate-snapshot rule;
+  - 3-source limit;
+  - fail clean nếu không có verified content.
+
+### Lỗi 4: False-positive success trong terminal
+
+- triệu chứng:
+  - terminal từng có thể báo `success_verified` dù output là fallback/degraded.
+- root cause:
+  - heuristic marker chưa đủ chặt.
+- cách fix:
+  - siết marker trong `test_research.py`;
+  - dùng CloudWatch `request_end outcome` và `research_ingest` làm source of truth.
+
+### Lỗi 5: Vector store bị ô nhiễm bởi fallback notes
+
+- triệu chứng:
+  - S3 Vectors có document không dựa trên web content thật.
+- root cause:
+  - fallback note trước đây vẫn được ingest.
+- cách fix hiện tại:
+  - `tools.py` yêu cầu clean `source_url`;
+  - reject degraded analysis;
+  - `/research` trả 500 nếu không có verified content.
+
+## Các lệnh cốt lõi của Day 5
+
+### Deploy Researcher
+
+```bash
+cd backend/researcher
+uv run deploy.py
+```
+
+### Test một topic
+
+```bash
+uv run test_research.py "NVIDIA AI datacenter demand"
+```
+
+### Test benchmark topic set
+
+```bash
+uv run test_research.py "Tesla competitive advantages"
+uv run test_research.py "Microsoft cloud revenue growth"
+uv run test_research.py "NVIDIA AI datacenter demand"
+uv run test_research.py "Amazon advertising growth"
+uv run test_research.py "Apple services revenue growth"
+```
+
+### Xem CloudWatch evidence
+
+```bash
+aws logs tail /aws/lambda/alex-researcher --since 20m --region ap-southeast-1 | rg "research_run|research_ingest|snapshot_page_url"
+```
+
+### Kiểm tra model active an toàn
+
+```bash
+aws lambda get-function-configuration \
+  --function-name alex-researcher \
+  --region ap-southeast-1 \
+  --query 'Environment.Variables.RESEARCHER_MODEL' \
+  --output text
+```
+
+### Verify ingest/search sau khi có verified success
+
+```bash
+cd ../ingest
+uv run test_search_s3vectors.py
+```
+
+## Trạng thái kết thúc Day 5
+
+Nếu Day 5 hoàn thành đúng, trạng thái mong muốn là:
+
+1. đã deploy được Researcher qua Lambda Function URL;
+2. đã hiểu rõ guide có một số đoạn cũ nhắc App Runner/Bedrock nhưng repo hiện chạy Lambda/OpenAI model;
+3. đã có Docker image Researcher trong ECR;
+4. đã test được `/health` và `/research`;
+5. đã hiểu rằng verified-web-only `500` là clean failure khi không có article content thật;
+6. đã có observability đủ để đọc run theo `run_id`;
+7. đã có bằng chứng `success_verified` reproducible cho NVIDIA/Investopedia;
+8. đã consolidate docs Researcher thành README/spec/plan mới;
+9. còn một task mở: benchmark `openai/gpt-5.4-nano` vs `openrouter/openai/gpt-oss-120b`.
+
+## Handoff sang Week 4 / bước tiếp theo
+
+Trước khi sang Guide 5 hoặc giao cho agent khác benchmark model, cần kiểm tra:
+
+1. `backend/researcher/README.md` đã được đọc chưa;
+2. `docs/superpowers/specs/2026-07-06-researcher-model-benchmark-design.md` đã được đọc chưa;
+3. `docs/superpowers/plans/2026-07-06-researcher-model-benchmark.md` đã được đọc chưa;
+4. `startup_prompt.md` có thể dùng làm prompt giao việc cho agent khác;
+5. worktree có thể còn dirty ở `terraform/4_researcher/main.tf`, `terraform/4_researcher/outputs.tf`, và `startup_prompt.md`;
+6. không được commit/revert các file dirty ngoài scope nếu chưa hỏi.
+
+Task tiếp theo được định nghĩa rõ trong plan:
+
+- bắt đầu từ Task 1: Preflight Current Benchmark Readiness;
+- sau đó benchmark Model A `openai/gpt-5.4-nano`;
+- tiếp theo benchmark Model B `openrouter/openai/gpt-oss-120b`;
+- cuối cùng ghi recommendation vào plan và README.
+
+---
+
 # Template Append Cho Ngày Sau
 
 Mỗi ngày mới nên append theo form này:
@@ -977,3 +1504,15 @@ Mỗi ngày mới nên append theo form này:
   - `terraform/3_ingestion`
 - Đã ghi lại đầy đủ flow ingest, packaging, Terraform deploy, local test, và semantic search.
 - Đã ghi chú điểm lệch cần theo dõi giữa guide Day 4 và implementation hiện tại của repo ở lớp vector storage.
+
+## Day 5
+
+- Đã append nhật ký cho:
+  - `tai_lieu/week3/day5_summary.md`
+  - `guides/4_researcher.md`
+  - `backend/researcher`
+  - `terraform/4_researcher`
+- Đã ghi lại flow Researcher như một ETL/data pipeline nối web research với ingest API và S3 Vectors.
+- Đã ghi rõ implementation thực tế hiện tại dùng Lambda Function URL, không phải App Runner.
+- Đã ghi lại verified-web-only contract, immediate-snapshot strategy, observability events, và benchmark topic set.
+- Đã ghi chú trạng thái còn mở: benchmark `openai/gpt-5.4-nano` vs `openrouter/openai/gpt-oss-120b`.

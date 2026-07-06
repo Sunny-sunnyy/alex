@@ -6,9 +6,9 @@ Researcher là một service AI độc lập có nhiệm vụ:
 
 - nhận yêu cầu nghiên cứu một chủ đề đầu tư;
 - cố gắng duyệt web bằng Playwright MCP để tìm nguồn phù hợp;
-- tạo ghi chú phân tích ngắn;
-- gọi ingest pipeline của Part 3 để lưu kết quả vào knowledge base;
-- trả kết quả về cho caller.
+- chỉ tạo ghi chú phân tích khi có **verified web-derived content**;
+- chỉ gọi ingest pipeline của Part 3 khi có `source_url` sạch và nội dung web thật;
+- trả kết quả về cho caller hoặc fail rõ nếu không lấy được article content thật.
 
 Trong implementation hiện tại của repo:
 
@@ -45,12 +45,11 @@ Luồng runtime cơ bản:
    - ingest tool trong `tools.py`
 4. Agent thử browser path trước
 5. Nếu browser path không ổn, runtime có thể đi sang:
-   - constrained browser fallback
-   - browserless fallback
-6. Khi có note cuối, agent gọi `ingest_financial_document()`
+   - constrained browser retry
+6. Chỉ khi có note cuối dựa trên web content thật, agent mới được gọi `ingest_financial_document()`
 7. `tools.py` gửi payload sang ingest API của Part 3
 8. Kết quả được lưu vào knowledge base
-9. Researcher trả response text cho caller
+9. Nếu không chứng minh được verified web content, Researcher trả `500` và không ingest gì
 
 ## Luồng deploy
 
@@ -66,14 +65,14 @@ Trong các phiên debug gần đây, do Terraform provider có lúc lỗi, team 
 2. push ECR
 3. `aws lambda update-function-code --image-uri ...`
 
+Hiện tại `uv run deploy.py` đã deploy lại được theo flow chuẩn.
+
 ## Trạng thái thực tế hiện tại
 
 Hiện tại Researcher đã:
 
-- trả `200 OK` ổn định hơn ở Step 4 theo nghĩa thực dụng;
-- ingest được kết quả;
 - có terminal summary trong `test_research.py`;
-- có slice observability đầu tiên trong `server.py`:
+- có structured observability ở `server.py`:
   - `run_id`
   - `phase_start`
   - `phase_end`
@@ -82,24 +81,49 @@ Hiện tại Researcher đã:
   - `research_ingest`
   - `document_id`
   - `success/error`
-- sau Task 5:
-  - browser loop pressure đã giảm
-  - fallback output usable hơn
-  - `uv run deploy.py` hiện đang deploy được lại
-  - follow-up ingest propagation đã làm `request_end ingest_success` khớp hơn với tool-level ingest logs
+- đã có follow-up ingest propagation để `request_end ingest_success` đọc observation theo `run_id`
 - trong pass mới nhất:
   - `/research` chỉ còn chấp nhận `verified web content`
   - tool ingest yêu cầu `source_url` sạch
   - fallback note không còn được ingest vào S3 Vectors
+  - agent bị cấm fabricate article URL và phải khám phá URL qua browser/search trước
+  - `browser_run` chính hiện dùng `max_turns=30`
+  - đã thử runtime experiment bỏ `--single-process` khỏi Playwright launch args
+  - prompt đã được siết thêm `immediate-snapshot` constraint để giảm drift window
+  - `browser_run` status giờ phân loại `article_captured` / `page_drifted` / `ok` thay vì chỉ `ok`
+  - có `snapshot_page_url` log trong CloudWatch để truy vết URL thực tế khi snapshot
+  - đã chứng minh được `success_verified` đầu tiên (NVIDIA AI datacenter demand, Investopedia article 2026-07-06)
 
 Nhưng vẫn còn hạn chế:
 
-- browser path trong Lambda vẫn không ổn định hoàn toàn;
-- sau verified-web-only gate, nhiều benchmark topic giờ fail `500` thay vì ingest fallback;
-- chưa chứng minh được `success_verified` ổn định trên production runtime hiện tại;
+- browser path trong Lambda vẫn chưa ổn định hoàn toàn (1/5 benchmark đạt `success_verified`, 4/5 vẫn fail);
+- sau verified-web-only gate, đa số benchmark topic vẫn fail `500`;
 - browser vẫn dễ rơi vào `about:blank`, `about:srcdoc`, client-storage/interstitial, hoặc ad-tech paths trước khi có article body sạch;
-- một issue mới đã được xác nhận:
-  - browser có thể `status=ok` nhưng vẫn không lấy được article content usable vì rơi vào `about:blank`, `about:srcdoc`, hoặc client-storage/interstitial paths.
+- browser có thể `status=ok` nhưng vẫn không lấy được article content usable.
+
+## Trạng thái verify hiện tại
+
+Các run live gần nhất xác nhận:
+
+- `Microsoft cloud revenue growth`
+  - từng fail với:
+    - `Verified web content not obtained: page_not_found.`
+  - sau anti-fabrication prompt fail với:
+    - `Verified web content not obtained: ingest did not record a clean source URL.`
+- `Tesla competitive advantages`
+  - fail với:
+    - `Verified web content not obtained: page_unavailable.`
+- `NVIDIA AI datacenter demand`
+  - **success_verified** ngày 2026-07-06
+  - snapshot captured Investopedia article: `nvidia-is-telling-chinese-customers...nvda-11996472`
+  - `browser_run status=article_captured`
+  - đây là lần đầu tiên browser path chứng minh được verified web content extraction
+
+Điều này có nghĩa là:
+
+- vector store sạch hơn trước vì fallback note không còn bị ingest
+- browser article retrieval trên Lambda headless runtime đã có bằng chứng thành công đầu tiên (NVIDIA/Investopedia)
+- nhưng vẫn chưa đủ ổn định để gọi là fully proven (1/5, chưa reproducible)
 
 ## Các file trong folder
 
@@ -115,7 +139,7 @@ Nhiệm vụ:
 - nhận request HTTP;
 - dựng model runtime;
 - chạy Researcher agent;
-- xử lý fallback browser/constrained/browserless;
+- xử lý browser run, constrained retry, và verified-web-only gate;
 - ghi structured observability logs;
 - expose các endpoint:
   - `/`
@@ -137,6 +161,7 @@ Nhiệm vụ:
 - quy định agent browse như thế nào;
 - giới hạn số trang;
 - ưu tiên nguồn nào;
+- cấm fabricate article URL;
 - xác định prompt mặc định khi không có topic.
 
 Hiện tại source preference được định hướng theo:
@@ -154,8 +179,9 @@ Hiện tại source preference được định hướng theo:
 
 Nhiệm vụ:
 
-- nhận `topic` và `analysis` từ agent;
+- nhận `topic`, `analysis`, và `source_url` từ agent;
 - đóng gói document;
+- từ chối ingest nếu content là fallback/degraded hoặc URL không sạch;
 - gọi ingest API;
 - retry khi gặp lỗi tạm thời.
 
@@ -181,6 +207,7 @@ Nhiệm vụ:
 - interstitial
 - tracker noise
 - lỗi browser trong Lambda
+- networking/proxy oddities của Chromium trong Lambda headless runtime
 
 ### Deploy
 
@@ -212,13 +239,11 @@ Nhiệm vụ:
 - gọi `/health`;
 - gọi `/research`;
 - in `RUN SUMMARY`;
-- phân loại terminal outcome:
-  - `success_verified`
-  - `success_fallback`
+- phân loại terminal outcome theo verified-web-only semantics;
 - in nội dung research cuối;
 - nhắc kiểm tra ingest bên `backend/ingest/test_search_s3vectors.py`.
 
-Đây là script phù hợp nhất để test Step 4 hiện tại.
+Đây là script phù hợp nhất để test Step 4 hiện tại và quan sát request fail đúng khi không có verified web content.
 
 #### `test_local.py`
 
@@ -311,48 +336,3 @@ Mô tả hướng quan sát, benchmark và failure taxonomy của Researcher.
 #### `session_handoff.md`
 
 Nhật ký handoff giữa các session để không mất context khi mở chat mới.
-
-## Các file liên kết với nhau như thế nào
-
-### Quan hệ runtime
-
-1. `server.py` gọi `context.py` để lấy prompt
-2. `server.py` gọi `mcp_servers.py` để có browser MCP
-3. `server.py` gắn tool từ `tools.py`
-4. Agent chạy và sinh final output
-5. `tools.py` gọi ingest API của Part 3
-
-### Quan hệ test
-
-1. `test_research.py` lấy URL từ `terraform/4_researcher`
-2. script gọi service đã deploy
-3. terminal summary giúp phân loại nhanh outcome
-4. nếu cần kiểm tra sâu hơn thì xem CloudWatch
-
-### Quan hệ deploy
-
-1. `deploy.py` phụ thuộc vào `Dockerfile`
-2. `deploy.py` phụ thuộc vào `terraform/4_researcher`
-3. `terraform/4_researcher` dùng image URI do `deploy.py` ghi ra
-
-## Nên đọc file nào trước
-
-Nếu muốn hiểu nhanh folder này, thứ tự nên là:
-
-1. `README.md`
-2. `server.py`
-3. `context.py`
-4. `tools.py`
-5. `mcp_servers.py`
-6. `test_research.py`
-7. `deploy.py`
-8. `BUG_AND_FIX.md`
-9. `session_handoff.md`
-
-Nếu mục tiêu là debug instability hiện tại, thứ tự tốt hơn là:
-
-1. `session_handoff.md`
-2. `BUG_AND_FIX.md`
-3. `server.py`
-4. `test_research.py`
-5. `OBSERVABILITY_AND_BENCHMARK_SPEC.md`

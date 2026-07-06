@@ -1035,3 +1035,52 @@ What is now true:
 - correctness is tighter than before
 - fallback notes are no longer polluting the vector store
 - the system still does **not** reliably retrieve clean web article content in Lambda headless runtime
+
+## Immediate-snapshot browser stability pass — 2026-07-06
+
+After the verified-web-only enforcement pass, the next pass targeted the specific failure mode proven by CloudWatch: browser navigates to article pages but JavaScript redirects drift the page into `about:blank`, `about:srcdoc`, or client-storage paths BEFORE the agent calls `browser_snapshot`.
+
+### Changes made
+
+**Files:** `backend/researcher/context.py`, `backend/researcher/server.py`
+
+**context.py:**
+- Added CRITICAL SNAPSHOT RULE: after `browser_navigate`, the very next action MUST be `browser_snapshot` — no intermediate clicks, scrolls, or other actions
+- Added explicit 3-source limit: Investopedia → AP News → CNN Business, stop after all 3 fail
+- Each source: navigate + immediate snapshot, then evaluate before trying next
+
+**server.py:**
+- Added `_detect_drifted_snapshot()` — detects about:blank, about:srcdoc, client-storage, optimizely, doubleclick, googlesyndication in response text
+- Added `_extract_snapshot_url()` — extracts "Source URL: https://..." from agent output
+- Updated browser phase-end classification: `article_captured` / `page_drifted` / `ok` / `max_turns` / `error`
+- Added `snapshot_page_url` CloudWatch log line
+
+### Deployment
+
+- Image: `deploy-1783329777`
+- `uv run deploy.py` built and pushed successfully; Terraform apply failed with "Plugin did not respond"
+- Lambda updated via `aws lambda update-function-code --image-uri ...`
+
+### Benchmark evidence (2026-07-06)
+
+| Topic | Status | Outcome |
+|-------|--------|---------|
+| Tesla competitive advantages | `ok` | failed (page_unavailable) |
+| Microsoft cloud revenue growth | `ok` | failed (no clean source URL) |
+| **NVIDIA AI datacenter demand** | **`article_captured`** | **success_verified** |
+| Amazon advertising growth | `ok` | failed (page_not_found) |
+| Apple services revenue growth | `ok` | failed (no clean source URL) |
+
+### What this proves
+
+- First ever `success_verified` in the benchmark history (NVIDIA/Investopedia)
+- Reproducible: 2/2 NVIDIA runs passed on 2026-07-06 with different Investopedia articles
+- Immediate-snapshot strategy works — article content was captured before JavaScript drift
+- 4/5 topics still fail: AP News and CNN Business sources not yet proven viable
+
+### Current conclusion
+
+- Immediate-snapshot is a proven improvement, not a complete fix
+- Browser path now has 1 reproducible success case (NVIDIA/Investopedia)
+- Remaining work: make other topics and sources (AP News, CNN Business) work consistently
+- The next logical step is model benchmark (`gpt-oss-120b` vs `gpt-5.4-nano`) — not yet executed

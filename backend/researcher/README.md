@@ -59,19 +59,10 @@ Luồng runtime cơ bản:
 4. `deploy.py` ghi image URI vào `terraform/4_researcher/researcher.auto.tfvars.json`
 5. `terraform/4_researcher` dùng image đó để deploy/update Lambda
 
-Trong các phiên debug gần đây, do Terraform provider có lúc lỗi, team đã nhiều lần dùng đường deploy thủ công:
+`uv run deploy.py` deploy duoc trong mot so phien, nhung Terraform AWS provider thinh thoang crash "Plugin did not respond". Fallback path:
 
-1. build image local
-2. push ECR
-3. `aws lambda update-function-code --image-uri ...`
-
-Hiện tại `uv run deploy.py` đã deploy lại được theo flow chuẩn trong mot so phien (Terraform AWS provider thinh thoang van crash "Plugin did not respond").
-
-Khi Terraform fail, fallback path la:
-
-1. build image local
-2. push ECR
-3. `aws lambda update-function-code --image-uri ...`
+1. build image local + push ECR
+2. `aws lambda update-function-code --image-uri ...`
 
 ## Trạng thái thực tế hiện tại
 

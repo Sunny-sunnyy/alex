@@ -411,28 +411,27 @@ Run:
 - fallback note không còn bị ingest
 - agent đã bị đẩy ra khỏi hành vi đoán URL article rồi lưu bừa
 
-### Runtime experiment mới nhất
+### Runtime experiment
 
 CloudWatch liên tục cho thấy Chromium log:
 
 - `Cannot use V8 Proxy resolver in single process mode`
 
-Vì vậy đã có thử nghiệm:
+Đã thử nghiệm:
 
 - bỏ `--single-process` khỏi Playwright launch args
 
-Kết quả hiện tại:
+Kết quả:
 
-- chưa tạo ra được `success_verified` ổn định cho benchmark Microsoft
-- browser vẫn drift vào:
-  - `about:blank`
-  - `about:srcdoc`
-  - ad-tech / sync / iframe / client-storage paths
+- **inconclusive** — không tạo ra được `success_verified` ổn định từ experiment này
+- Immediate-snapshot strategy (2026-07-06) mới là hướng tạo ra `success_verified` đầu tiên
 
-### Trạng thái đúng hiện tại
+### Trạng thái đúng hiện tại (updated 2026-07-06)
 
 - ingest correctness: cải thiện rõ
-- browser-content retrieval stability: vẫn chưa được chứng minh
+- browser-content retrieval stability: đã có bằng chứng thành công reproducible (NVIDIA/Investopedia, 2/2, 2026-07-06)
+- 4/5 benchmark topic vẫn fail — chưa đủ ổn định để gọi là fully proven
+- immediate-snapshot strategy đã giúp capture article content trước JavaScript drift (xem BUG_AND_FIX.md)
 - benchmark future nên đánh giá riêng hai câu hỏi:
   - request có fail đúng khi không có verified content không
   - và browser có thật sự lấy được clean article body không

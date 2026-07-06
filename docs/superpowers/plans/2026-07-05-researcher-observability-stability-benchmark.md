@@ -8,6 +8,16 @@
 
 **Tech Stack:** Python 3.12, FastAPI, OpenAI Agents SDK, LiteLLM, Playwright MCP, AWS Lambda Function URL, CloudWatch Logs, Terraform, `uv`
 
+## Execution Status — 2026-07-06
+
+- **Tasks 1-5: COMPLETE.** Observability, ingest telemetry, evidence gathering, browser fallback churn reduction, terminal classification all done and deployed.
+- **Tasks 6-9: NOT STARTED.** Model benchmark (`gpt-oss-120b` vs `gpt-5.4-nano`) not yet executed.
+- **Additional follow-up: COMPLETE.** `request_end ingest_success` propagation fixed (run-id-keyed map).
+- **Additional pass: COMPLETE.** Verified-web-only enforcement — fallback notes blocked from S3 Vectors.
+- **Additional pass: COMPLETE.** Immediate-snapshot browser stability — first `success_verified` achieved (NVIDIA/Investopedia, reproducible 2/2). See `docs/superpowers/specs/2026-07-06-researcher-immediate-snapshot-browser-stability-design.md`.
+
+Current active deploy: `deploy-1783329777` (immediate-snapshot + drift detection).
+
 ## Status Update - 2026-07-05
 
 Current verified state before the broader observability work:

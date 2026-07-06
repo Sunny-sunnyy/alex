@@ -45,7 +45,25 @@ Nhưng implementation thực tế trong repo hiện tại là:
 - **Lambda Function URL**
 - **ECR**
 
+Ngoài ra, runtime thực tế hiện tại còn có các đặc điểm quan trọng:
+
+- model researcher mặc định: `openai/gpt-5.4-nano`
+- policy ingest hiện tại là `verified-web-only`
+  - chỉ ingest khi có `source_url` sạch
+  - fallback note không còn được phép đi vào S3 Vectors
+
 Vì vậy khi đọc folder này, hãy coi đây là source of truth cho hạ tầng hiện tại của Researcher.
+
+## Trạng thái behavior hiện tại của service
+
+Hạ tầng trong folder này đang chạy một version Researcher với behavior đã bị siết hơn trước:
+
+- `/research` không còn là best-effort ingest service
+- nếu browser không chứng minh được nội dung web thật:
+  - request có thể trả `500`
+  - và không ingest gì vào vector store
+
+Điều này là chủ ý để giữ knowledge base sạch hơn.
 
 ## Các file trong thư mục
 
@@ -159,8 +177,6 @@ Nó thường chứa:
 
 Không nên commit nội dung nhạy cảm của file này.
 
-### File override image URI
-
 #### `researcher.auto.tfvars.json`
 
 File này thường được script `backend/researcher/deploy.py` ghi tự động.
@@ -170,7 +186,10 @@ Nhiệm vụ:
 - truyền `researcher_image_uri` mới nhất vào Terraform;
 - giúp Terraform biết image nào cần deploy/update.
 
-Đây là một phần quan trọng trong deploy flow hiện tại.
+Lưu ý:
+
+- file này được commit trong repo hiện tại để phản ánh image đang chạy thật trên Lambda
+- trước khi sửa code mới, nên kiểm tra diff của file này để tránh hiểu nhầm image production đang active
 
 ### File lock provider
 
@@ -228,10 +247,6 @@ Vai trò:
 
 - cho phép Lambda pull image layers từ ECR.
 
-Không có policy này:
-
-- Lambda có thể không lấy được image để khởi chạy function.
-
 ### 3. IAM Role cho Researcher Lambda
 
 Resource:
@@ -261,6 +276,7 @@ Nó:
 - chạy image từ ECR
 - inject biến môi trường cho runtime
 - chạy FastAPI app trong container
+- đang chạy một runtime đã được sửa để enforce verified-web-only behavior
 
 Lưu ý:
 
@@ -321,194 +337,45 @@ Vai trò:
 
 - chạy automated research theo lịch `rate(2 hours)`.
 
-Điều này giúp knowledge base có thể được làm giàu dần theo thời gian.
+## Trạng thái deploy gần đây
 
-## Cách các file trong thư mục liên kết với nhau
+`uv run deploy.py` hiện đang deploy được lại.
 
-### Luồng logic nội bộ
+Flow hiện tại:
 
-1. `variables.tf` định nghĩa Terraform cần input gì.
-2. `terraform.tfvars` và `researcher.auto.tfvars.json` cung cấp giá trị thật.
-3. `main.tf` dùng các giá trị đó để tạo resource AWS.
-4. `outputs.tf` xuất ra URL, function name, status để người dùng và script dùng tiếp.
-5. `terraform.tfstate` lưu trạng thái thực tế của deployment.
+1. Terraform tạo/refresh ECR + IAM prerequisites
+2. `deploy.py` build image mới
+3. image được push lên ECR
+4. `researcher.auto.tfvars.json` được cập nhật
+5. Terraform update Lambda image
+6. script chờ Lambda active rồi in Function URL
 
-### Quan hệ giữa `terraform.tfvars` và `researcher.auto.tfvars.json`
+Các image tag live gần đây đã được dùng trong quá trình verify gồm:
 
-Đây là điểm quan trọng của flow hiện tại.
+- `deploy-1783267083`
+- `deploy-1783267341`
+- `deploy-1783267702`
 
-- `terraform.tfvars` thường do người dùng tự điền:
-  - region
-  - keys
-  - endpoint ingest
-  - scheduler flag
+Những deploy này phục vụ cho:
 
-- `researcher.auto.tfvars.json` thường do `backend/researcher/deploy.py` tự ghi:
-  - `researcher_image_uri`
+- verified-web-only enforcement
+- anti-fabrication prompt pass
+- runtime experiment bỏ `--single-process`
 
-Vì vậy deploy flow thực tế là:
+## Điều đã được chứng minh và chưa được chứng minh
 
-1. người dùng cấu hình `terraform.tfvars`
-2. `deploy.py` build/push image
-3. `deploy.py` ghi `researcher.auto.tfvars.json`
-4. `terraform apply` dùng cả hai nguồn input
+Đã được chứng minh:
 
-## Luồng hoạt động deploy end-to-end
+- deploy path bằng `uv run deploy.py` hiện hoạt động
+- Function URL, ECR, và Lambda update flow hoạt động
+- service có thể fail đúng theo verified-web-only contract
 
-### Bước 1: Tạo hạ tầng nền
+Chưa được chứng minh:
 
-Có thể apply Terraform sớm để tạo:
+- browser-based `success_verified` ổn định trên Lambda
+- clean article extraction ổn định từ các source ưu tiên
 
-- ECR repository
-- IAM roles
+Nói ngắn gọn:
 
-Điều này cho phép bước build/push image có nơi để đẩy image lên.
-
-### Bước 2: Build và push image
-
-`backend/researcher/deploy.py` sẽ:
-
-1. build Docker image từ `backend/researcher/Dockerfile`
-2. tag image bằng timestamp
-3. push image lên ECR
-
-### Bước 3: Ghi image URI cho Terraform
-
-`deploy.py` ghi:
-
-- `terraform/4_researcher/researcher.auto.tfvars.json`
-
-để truyền image URI vào Terraform.
-
-### Bước 4: Terraform deploy Lambda
-
-Khi `researcher_image_uri` đã có:
-
-- `aws_lambda_function.researcher` được tạo hoặc update
-- `aws_lambda_function_url.researcher` được tạo
-
-### Bước 5: Test service
-
-Sau deploy:
-
-- `outputs.tf` cung cấp `researcher_url`
-- `backend/researcher/test_research.py` dùng URL này để test
-
-## Luồng hoạt động của service sau khi hạ tầng đã deploy
-
-1. Client gọi Lambda Function URL
-2. Request vào container Researcher
-3. FastAPI trong `backend/researcher/server.py` xử lý request
-4. Agent tạo research note
-5. Agent gọi ingest API từ Part 3
-6. Ingest pipeline tạo embedding và lưu vào vector store
-7. Response trả lại cho client
-
-## Thư mục này liên kết với các phần trước như thế nào?
-
-### Liên kết với `backend/researcher`
-
-Đây là liên kết trực tiếp nhất.
-
-`terraform/4_researcher` không chứa logic research.
-
-Nó chỉ:
-
-- tạo nơi chứa image;
-- deploy image đó lên AWS;
-- cấp URL và permission để image chạy thành service.
-
-Code được deploy thực sự nằm ở:
-
-- `backend/researcher`
-
-### Liên kết với `backend/ingest`
-
-Researcher phụ thuộc vào ingest pipeline để lưu knowledge.
-
-Terraform Part 4 không deploy ingest, nhưng nó inject:
-
-- `ALEX_API_ENDPOINT`
-- `ALEX_API_KEY`
-
-vào runtime của Researcher Lambda.
-
-Hai biến này là cầu nối để code trong `backend/researcher/tools.py` gọi sang Part 3.
-
-### Liên kết với `terraform/3_ingestion`
-
-Part 4 cần output từ Part 3.
-
-Cụ thể:
-
-- ingest endpoint URL
-- ingest API key
-
-Nếu Part 3 chưa có hoặc sai cấu hình:
-
-- Researcher Lambda vẫn có thể chạy,
-- nhưng bước lưu research vào knowledge base sẽ fail.
-
-### Liên kết với `terraform/2_sagemaker`
-
-Part 4 không gọi SageMaker trực tiếp trong Terraform.
-
-Nhưng chuỗi phụ thuộc thực tế là:
-
-- Researcher -> Ingest API -> Lambda ingest -> SageMaker endpoint
-
-Nghĩa là nếu Part 2 hỏng:
-
-- Part 4 có thể bị ảnh hưởng gián tiếp ở bước ingest.
-
-## Ý nghĩa của các biến quan trọng
-
-### `researcher_image_uri`
-
-Biến quan trọng nhất để quyết định Lambda researcher có được tạo hay không.
-
-Nếu biến này rỗng:
-
-- Terraform chỉ tạo hạ tầng nền
-- chưa tạo Lambda researcher thật
-
-### `researcher_model`
-
-Model runtime mà Researcher sẽ dùng.
-
-Trong repo hiện tại, default đang là:
-
-- `openai/gpt-5.4-nano`
-
-### `scheduler_enabled`
-
-Quyết định có bật automated research hay không.
-
-Khuyến nghị:
-
-- để `false` trong lúc debug ban đầu
-- chỉ bật khi manual flow đã chạy ổn
-
-## Cách hiểu thư mục này theo vai trò
-
-Nếu tóm tắt ngắn:
-
-- `main.tf` là blueprint hạ tầng
-- `variables.tf` là hợp đồng đầu vào
-- `outputs.tf` là nơi trả dữ liệu ra ngoài
-- `terraform.tfvars.example` là mẫu cấu hình
-- `researcher.auto.tfvars.json` là cầu nối giữa `deploy.py` và Terraform
-
-## Tóm tắt
-
-`terraform/4_researcher` là phần **hạ tầng AWS** cho Researcher ở Part 4.
-
-Nó chịu trách nhiệm:
-
-- tạo ECR repository;
-- deploy Researcher dưới dạng Lambda container image;
-- public service qua Function URL;
-- cấp biến môi trường để Researcher gọi ingest pipeline;
-- và bật scheduler tự động nếu cần.
-
-Nếu `backend/researcher` là phần **logic ứng dụng**, thì `terraform/4_researcher` là phần **đưa logic đó lên AWS và biến nó thành service dùng thật**.
+- hạ tầng deploy ổn
+- runtime browser/content path vẫn là điểm nghẽn chính

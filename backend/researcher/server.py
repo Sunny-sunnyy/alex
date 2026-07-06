@@ -202,6 +202,50 @@ def _detect_degraded_reason(response_text: str) -> str | None:
     return None
 
 
+def _detect_drifted_snapshot(response_text: str) -> bool | None:
+    """Return True if response suggests the snapshot captured a drifted page.
+
+    Drift signatures include about:blank, about:srcdoc, client-storage
+    (Optimizely), and ad-tech iframe paths.  Returns None when the
+    response does not contain any clear article-content evidence either
+    way (inconclusive).
+    """
+    lowered = response_text.lower()
+    drift_markers = [
+        "about:blank",
+        "about:srcdoc",
+        "client-storage",
+        "client_storage",
+        "optimizely",
+        "doubleclick",
+        "googlesyndication",
+    ]
+    if any(marker in lowered for marker in drift_markers):
+        return True
+    return None
+
+
+def _extract_snapshot_url(response_text: str) -> str | None:
+    """Try to extract the article URL the agent claims it used.
+
+    The agent is prompted to include 'Source URL: https://...' in its
+    output when it actually used a clean article page.
+    """
+    lowered = response_text.lower()
+    marker = "source url:"
+    idx = lowered.find(marker)
+    if idx == -1:
+        return None
+    remainder = response_text[idx + len(marker):].strip()
+    url_end = remainder.find("\n")
+    if url_end == -1:
+        url_end = len(remainder)
+    url = remainder[:url_end].strip()
+    if url.startswith("http"):
+        return url
+    return None
+
+
 # Hàm này suy luận ingest có khả năng thành công hay không từ nội dung final output.
 # Đây mới là inference nhẹ, chưa phải tool-level telemetry chính xác tuyệt đối.
 def _infer_ingest_success(response_text: str) -> bool | None:
@@ -290,7 +334,7 @@ def _build_research_query(topic: Optional[str], constrained: bool = False) -> st
             "to captcha or access-restricted interstitial pages. If a source is blocked, switch once and continue. "
             "Never invent or guess an article URL slug. First discover the article URL from browser-visible "
             "search results or on-site navigation, then open it. "
-            "If both allowed direct article attempts fail, stop and say verified web content was not obtained. "
+            "If all 3 allowed direct article attempts fail, stop and say verified web content was not obtained. "
             "Include a line exactly like 'Source URL: https://...' only when you actually used a clean article page. "
             "Do not ask the user to provide another link or choose another source. "
             "Do not write a fallback note from general market knowledge."
@@ -436,7 +480,20 @@ async def run_research_agent(topic: str = None) -> str:
                 max_turns=browser_max_turns,
                 use_browser=True,
             )
-            _end_phase(trace_state, "browser_run", status="ok")
+            snapshot_url = _extract_snapshot_url(response_text)
+            drifted = _detect_drifted_snapshot(response_text)
+            if drifted is True:
+                _end_phase(trace_state, "browser_run", status="page_drifted")
+            elif snapshot_url:
+                _end_phase(trace_state, "browser_run", status="article_captured")
+            else:
+                _end_phase(trace_state, "browser_run", status="ok")
+            if snapshot_url:
+                logger.info(
+                    "research_run snapshot_page_url run_id=%s url=%s",
+                    trace_state.run_id,
+                    snapshot_url,
+                )
         except MaxTurnsExceeded:
             _end_phase(
                 trace_state,
@@ -468,7 +525,20 @@ async def run_research_agent(topic: str = None) -> str:
                     max_turns=constrained_browser_max_turns,
                     use_browser=True,
                 )
-                _end_phase(trace_state, "constrained_browser_run", status="ok")
+                constrained_snapshot_url = _extract_snapshot_url(response_text)
+                constrained_drifted = _detect_drifted_snapshot(response_text)
+                if constrained_drifted is True:
+                    _end_phase(trace_state, "constrained_browser_run", status="page_drifted")
+                elif constrained_snapshot_url:
+                    _end_phase(trace_state, "constrained_browser_run", status="article_captured")
+                else:
+                    _end_phase(trace_state, "constrained_browser_run", status="ok")
+                if constrained_snapshot_url:
+                    logger.info(
+                        "research_run snapshot_page_url run_id=%s url=%s",
+                        trace_state.run_id,
+                        constrained_snapshot_url,
+                    )
             except MaxTurnsExceeded:
                 _end_phase(
                     trace_state,

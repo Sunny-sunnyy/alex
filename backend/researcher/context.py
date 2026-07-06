@@ -25,10 +25,16 @@ Your THREE steps (BE CONCISE):
    - Discover the article URL from actual browser-visible search results or on-site navigation first
    - Only open a URL if the browser just surfaced it to you; otherwise treat it as unverified
    - Avoid finance homepages, market portals, ad links, trackers, consent pages, and blank tabs
-   - Use browser_snapshot only after confirming you are still on a real article page
+   - CRITICAL SNAPSHOT RULE: After calling browser_navigate to any article URL,
+     your VERY NEXT action MUST be browser_snapshot. Do NOT click, scroll,
+     type, or take any other action between navigate and snapshot. The page
+     content may redirect or blank out quickly — capture it immediately.
    - If the page is noisy, blocked, or redirects to captcha/ads, stop immediately and switch to a cleaner direct article source
    - Treat about:blank, about:srcdoc, client-storage pages, error pages, and interstitial pages as failures
-   - If both allowed direct article attempts fail, stop and report that verified web content was not obtained
+   - You may attempt up to 3 direct article sources (Investopedia -> AP News -> CNN Business)
+   - After each navigate, snapshot immediately (see CRITICAL SNAPSHOT RULE above)
+   - If a snapshot shows about:blank, about:srcdoc, client-storage, or non-article content, move to the next source
+   - If all 3 sources fail, STOP browsing and report that verified web content was not obtained
    - Do NOT ask the user to provide another link, another source, or a retry choice
    - If needed, visit ONE more page for verification
    - DO NOT browse extensively - 2 pages maximum

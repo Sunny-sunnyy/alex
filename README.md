@@ -1439,6 +1439,456 @@ Task tiếp theo được định nghĩa rõ trong plan:
 
 ---
 
+# Week 4 / Day 1 - Database And Shared Infrastructure (`guides/5_database.md`)
+
+## Phạm vi Day 1
+
+Day này đánh dấu việc Alex chuyển từ research infrastructure của Week 3 sang lõi dữ liệu quan hệ của Week 4.
+
+Phạm vi chính của ngày này:
+
+- `tai_lieu/week4/day1_summary.md`
+- `guides/5_database.md`
+- `backend/database`
+- `terraform/5_database`
+- các phần trước có liên quan trực tiếp:
+  - `guides/3_ingest.md`
+  - `guides/4_researcher.md`
+  - `backend/ingest`
+  - `backend/researcher`
+  - `terraform/3_ingestion`
+  - `terraform/4_researcher`
+
+Lý do phải kéo theo bối cảnh của ingest và researcher:
+
+1. database không đứng riêng; nó là lớp stateful mới đặt bên dưới researcher, API và agent orchestra;
+2. Week 3 đã xây knowledge base qua SageMaker + S3 Vectors, còn Week 4 bắt đầu thêm relational state cho users, accounts, positions, jobs;
+3. muốn hiểu Guide 5 đúng thì phải nhìn nó như cầu nối từ RAG/data pipeline sang multi-agent financial SaaS.
+
+## Mục tiêu của Day 1
+
+Mục tiêu học và triển khai của `guides/5_database.md` là:
+
+1. hiểu vì sao Alex cần relational database thay vì chỉ sống bằng vector storage;
+2. deploy Aurora Serverless v2 PostgreSQL với Data API;
+3. tạo schema chung cho user, account, position, instrument, job;
+4. tạo shared Python database package để API và agents dùng lại;
+5. seed dữ liệu instrument để Part 6 có thể chạy orchestration thực tế;
+6. lưu các output và env values cần thiết cho Guide 6 và Guide 7.
+
+## Những file đã được dùng để lấy ngữ cảnh
+
+Để ghi lại Day này đúng với repo state, các nguồn quan trọng cần đọc là:
+
+- `README.md` của project này để nối mạch với Day 3, Day 4, Day 5;
+- `gameplan.md`;
+- `guides/architecture.md`;
+- `guides/agent_architecture.md`;
+- `tai_lieu/week4/day1_summary.md`;
+- `guides/5_database.md`;
+- `backend/database/README.md`;
+- `terraform/5_database/README.md`;
+- `backend/database/migrations/001_schema.sql`;
+- `backend/database/src/client.py`;
+- `backend/database/src/models.py`;
+- `backend/database/src/schemas.py`;
+- `backend/database/run_migrations.py`;
+- `backend/database/seed_data.py`;
+- `backend/database/reset_db.py`;
+- `backend/database/test_data_api.py`;
+- `backend/database/verify_database.py`;
+- `terraform/5_database/main.tf`;
+- `terraform/5_database/variables.tf`;
+- `terraform/5_database/outputs.tf`.
+
+Vai trò của từng nhóm file:
+
+- `tai_lieu/week4/day1_summary.md`: nền lý thuyết về multi-agent architecture, Aurora, Data API và lý do dùng shared database;
+- `guides/5_database.md`: workflow thực hành chính thức của course;
+- `backend/database/*`: source of truth cho database package và schema thực tế;
+- `terraform/5_database/*`: source of truth cho hạ tầng Aurora/Data API hiện tại của repo;
+- hai file README mới tạo cho Part 5: tài liệu hóa lại để ngày sau không phải đọc lại từ đầu toàn bộ code mới hiểu được cấu trúc.
+
+## Day 1 - Phần 1: Vì sao Week 4 phải thêm relational database
+
+Đến cuối Week 3, Alex đã có:
+
+- SageMaker embedding endpoint;
+- ingest pipeline;
+- S3 Vectors knowledge base;
+- researcher service có thể tìm web content và ingest vào vector store.
+
+Nhưng như vậy vẫn chưa đủ để trở thành một SaaS financial planner nhiều người dùng. Những thứ vector store không giải quyết tốt:
+
+- user profile có retirement targets;
+- nhiều account thuộc một user;
+- positions và cash balances;
+- trạng thái bất đồng bộ của job phân tích;
+- kết quả riêng của từng worker agent trong một pipeline orchestration.
+
+Vì thế Day 1 của Week 4 thêm một relational core mới:
+
+- **Aurora PostgreSQL Serverless v2** cho dữ liệu quan hệ;
+- **Data API** để code Python/Lambda gọi SQL qua HTTPS;
+- **shared database package** để mọi phần sau dùng chung một access pattern.
+
+## Day 1 - Phần 2: Database architecture của Alex
+
+Theo lesson summary và guide, Alex bắt đầu hình thành một kiến trúc hai lớp dữ liệu:
+
+1. **Knowledge layer**
+   - dùng `S3 Vectors`
+   - chứa research content, embeddings, semantic retrieval
+   - phục vụ context augmentation cho planner/reporter và các flows kiểu RAG
+
+2. **Transactional/relational layer**
+   - dùng `Aurora Serverless v2 PostgreSQL`
+   - chứa user/account/position/job state
+   - phục vụ portfolio CRUD, orchestration state, và output persistence
+
+Tóm tắt vai trò:
+
+| Lớp dữ liệu | AWS service | Chứa gì | Ai dùng |
+|---|---|---|---|
+| Knowledge / semantic | S3 Vectors | research documents, embeddings | ingest, researcher, planner/reporter |
+| Relational / transactional | Aurora PostgreSQL | users, instruments, accounts, positions, jobs | API, planner, tagger, reporter, charter, retirement |
+
+Đây là điểm kiến trúc quan trọng nhất của Day 1: Alex từ đây trở đi là hệ thống **vừa có vector memory, vừa có transactional state**.
+
+## Day 1 - Phần 3: `terraform/5_database`
+
+Folder `terraform/5_database` là lớp hạ tầng cho Part 5.
+
+Những gì được tạo:
+
+1. `random_password.db_password`
+2. `random_id.suffix`
+3. `aws_secretsmanager_secret.db_credentials`
+4. `aws_secretsmanager_secret_version.db_credentials`
+5. `aws_db_subnet_group.aurora`
+6. `aws_security_group.aurora`
+7. `aws_rds_cluster.aurora`
+8. `aws_rds_cluster_instance.aurora`
+9. `aws_iam_role.lambda_aurora_role`
+10. `aws_iam_role_policy.lambda_aurora_policy`
+11. `aws_iam_role_policy_attachment.lambda_basic`
+
+Điểm kỹ thuật cần nhớ:
+
+- cluster dùng `aurora-postgresql`;
+- engine version hiện tại là `15.12`;
+- Data API được bật bằng `enable_http_endpoint = true`;
+- scaling range lấy từ:
+  - `min_capacity`
+  - `max_capacity`
+- setup này đang dùng **default VPC + default subnets**;
+- đây là cấu hình học/dev thuận tiện, không phải hardened production baseline.
+
+### Output quan trọng của Part 5
+
+Guide 5 và code Terraform cùng hội tụ vào các output phải lưu lại cho ngày sau:
+
+- `aurora_cluster_arn`
+- `aurora_secret_arn`
+- `database_name`
+- `lambda_role_arn`
+- `data_api_enabled`
+
+Trong thực tế, quan trọng nhất cho runtime là:
+
+```env
+AURORA_CLUSTER_ARN=...
+AURORA_SECRET_ARN=...
+```
+
+## Day 1 - Phần 4: `backend/database`
+
+Folder `backend/database` là shared package của Part 5.
+
+Các thành phần chính:
+
+- `migrations/001_schema.sql`
+- `src/client.py`
+- `src/models.py`
+- `src/schemas.py`
+- `run_migrations.py`
+- `seed_data.py`
+- `reset_db.py`
+- `test_data_api.py`
+- `verify_database.py`
+
+### Vai trò của từng lớp
+
+| Thành phần | Vai trò |
+|---|---|
+| `001_schema.sql` | source of truth cho schema SQL |
+| `client.py` | wrapper cho `boto3 rds-data` |
+| `models.py` | facade CRUD/domain helpers cho từng bảng |
+| `schemas.py` | Pydantic validation + typed contracts |
+| `run_migrations.py` | tạo bảng/index/trigger qua Data API |
+| `seed_data.py` | nạp 22 instruments |
+| `reset_db.py` | reset schema + test data |
+| `test_data_api.py` | smoke test Aurora/Data API |
+| `verify_database.py` | integrity report cuối ngày |
+
+### Schema lõi của Alex từ Day 1
+
+Database có 5 bảng chính:
+
+1. `users`
+2. `instruments`
+3. `accounts`
+4. `positions`
+5. `jobs`
+
+Ý nghĩa business:
+
+- `users`: profile tối thiểu ngoài Clerk
+- `instruments`: shared reference data để các agent biết allocation/price/type
+- `accounts`: mỗi user có thể có nhiều bucket đầu tư
+- `positions`: holdings thật trong từng account
+- `jobs`: contract bất đồng bộ cho toàn bộ agent orchestra
+
+### Quyết định thiết kế quan trọng nhất
+
+`jobs` table không gom tất cả output vào một blob duy nhất, mà tách ra:
+
+- `report_payload`
+- `charts_payload`
+- `retirement_payload`
+- `summary_payload`
+
+Lợi ích:
+
+1. mỗi agent có cột ghi riêng;
+2. tránh merge JSON phức tạp;
+3. planner chỉ cần quản lý orchestration và final status;
+4. frontend/API về sau đọc kết quả từng block dễ hơn.
+
+Đây là lý do Guide 6 có thể orchestration song song khá gọn.
+
+## Day 1 - Phần 5: Data API và shared access pattern
+
+`backend/database/src/client.py` bọc RDS Data API thành một interface đơn giản hơn:
+
+- `execute()`
+- `query()`
+- `query_one()`
+- `insert()`
+- `update()`
+- `delete()`
+
+Nhờ Data API, code phía trên không cần:
+
+- mở connection PostgreSQL trực tiếp;
+- quản lý connection pooling;
+- cấu hình VPC attachment chỉ để chạy query cơ bản từ Lambda.
+
+Đây là một lợi thế lớn của lựa chọn Aurora + Data API trong ngữ cảnh course.
+
+Các env quan trọng của package:
+
+```env
+AURORA_CLUSTER_ARN=...
+AURORA_SECRET_ARN=...
+AURORA_DATABASE=alex
+DEFAULT_AWS_REGION=...
+```
+
+Maintainer note quan trọng:
+
+- nhiều phần downstream chỉ inject `AURORA_CLUSTER_ARN` và `AURORA_SECRET_ARN`;
+- tên database thường đang ngầm dùng default `alex` trong `DataAPIClient`.
+
+## Day 1 - Phần 6: Flow setup đúng của Guide 5
+
+Thứ tự hợp lý để làm Day 1:
+
+1. `terraform init` trong `terraform/5_database`
+2. `terraform apply`
+3. copy outputs vào `.env`
+4. `uv run test_data_api.py`
+5. `uv run run_migrations.py`
+6. `uv run seed_data.py`
+7. `uv run reset_db.py --with-test-data` nếu cần sample portfolio
+8. `uv run verify_database.py`
+
+Thứ tự này quan trọng vì:
+
+- nếu chưa verify Data API mà chạy migration, lỗi sẽ khó đọc hơn;
+- nếu chưa migration mà seed, insert sẽ fail;
+- nếu chưa seed instrument data, Part 6 sẽ rất thiếu nền tảng để tính allocation và portfolio analysis.
+
+## Hạ tầng / code / tài liệu đã được tạo hoặc đã sửa trong ngày
+
+Ở trạng thái repo hiện tại, phần Day 1 đã được tài liệu hóa lại bằng các file:
+
+- `backend/database/README.md`
+- `terraform/5_database/README.md`
+
+Mục đích của hai file này:
+
+- biến Guide 5 thành tài liệu học + maintainer reference;
+- giúp ngày sau không phải đọc lại toàn bộ code mới hiểu database part đang làm gì;
+- ghi rõ relationship giữa Part 5 với ingest, researcher, và agent orchestra.
+
+Ngoài ra, hai prompt tài liệu hóa cũng đã được nâng cấp để những lần sau agent không mô tả folder như một khối cô lập:
+
+- `prompt_readme_backend.md`
+- `prompt_readme_terraform.md`
+
+## Giá trị output quan trọng cần lưu cho ngày sau
+
+Day 1 là ngày phải đặc biệt giữ lại output vì Guide 6 và Guide 7 sẽ dùng lại.
+
+Cần nhớ:
+
+- `AURORA_CLUSTER_ARN`
+- `AURORA_SECRET_ARN`
+- `database_name` (`alex` nếu không đổi)
+- region đang deploy database
+- `terraform/5_database` đang dùng scaling range nào
+
+Các bước sau sẽ cần lại:
+
+- `terraform/6_agents` dùng `aurora_cluster_arn` và `aurora_secret_arn`
+- `terraform/7_frontend` dùng database outputs cho API Lambda qua remote state
+- `backend/api` và các agent đều sẽ cần access path này
+
+## Lỗi và bẫy quan trọng của Day 1
+
+### Lỗi 1: Chưa bật hoặc verify Data API
+
+- triệu chứng:
+  - query qua boto3 fail;
+  - script test không chạy;
+  - migration báo lỗi khó hiểu.
+- root cause:
+  - cluster chưa `available`;
+  - Data API chưa enable;
+  - cluster ARN / secret ARN sai.
+- cách fix:
+  - kiểm tra Terraform Part 5;
+  - chạy `uv run test_data_api.py` trước mọi bước sau.
+
+### Lỗi 2: Lệch region
+
+- triệu chứng:
+  - không tìm thấy cluster;
+  - không tìm thấy secret;
+  - outputs có nhưng script vẫn fail.
+- root cause:
+  - `.env` và region deploy không khớp nhau.
+- cách fix:
+  - kiểm tra `DEFAULT_AWS_REGION`;
+  - kiểm tra `terraform.tfvars`;
+  - xác minh ARN thực tế từ `terraform output`.
+
+### Lỗi 3: Schema drift giữa SQL file và migration runner
+
+- triệu chứng:
+  - `001_schema.sql` và database runtime không khớp;
+  - README nói một đằng, database tạo ra một nẻo.
+- root cause:
+  - `run_migrations.py` hiện giữ danh sách `statements` hard-code thay vì parse SQL file trực tiếp.
+- cách fix:
+  - khi sửa schema, phải kiểm tra cả:
+    - `migrations/001_schema.sql`
+    - `run_migrations.py`
+    - `src/models.py`
+    - `src/schemas.py`
+
+### Lỗi 4: Instrument seed fail
+
+- triệu chứng:
+  - `seed_data.py` fail trước hoặc giữa chừng.
+- root cause:
+  - allocation percentages không hợp lệ;
+  - schema chưa tạo xong;
+  - env không đủ.
+- cách fix:
+  - verify migration trước;
+  - để Pydantic validation trong `InstrumentCreate` chỉ ra instrument nào sai;
+  - chạy `verify_database.py` sau khi seed.
+
+### Lỗi 5: Quên đây là lớp cầu nối sang Part 6
+
+- triệu chứng:
+  - nghĩ rằng Part 5 chỉ là “thêm database” đơn thuần;
+  - đến Guide 6 mới phát hiện `jobs` table và `instruments` table là trung tâm orchestration.
+- root cause:
+  - đọc Day 1 như một lab RDS độc lập, không gắn với multi-agent architecture.
+- cách tránh:
+  - luôn nhìn `jobs` như state machine của orchestration;
+  - luôn nhìn `instruments` như shared financial metadata backbone cho worker agents.
+
+## Các lệnh cốt lõi của Day 1
+
+### Deploy database infrastructure
+
+```bash
+cd terraform/5_database
+terraform init
+terraform apply
+terraform output
+```
+
+### Test Data API
+
+```bash
+cd ../../backend/database
+uv run test_data_api.py
+```
+
+### Run schema + seed
+
+```bash
+uv run run_migrations.py
+uv run seed_data.py
+uv run verify_database.py
+```
+
+### Reset và tạo test data
+
+```bash
+uv run reset_db.py --with-test-data
+```
+
+## Trạng thái kết thúc Day 1
+
+Nếu Day 1 hoàn thành đúng, trạng thái mong muốn là:
+
+1. Aurora cluster đã được deploy;
+2. Data API đã được bật và test chạy được;
+3. schema 5 bảng lõi đã được tạo;
+4. seed instruments đã được nạp;
+5. shared database package đã sẵn sàng cho API và agents dùng lại;
+6. `AURORA_CLUSTER_ARN` và `AURORA_SECRET_ARN` đã được lưu đúng để dùng cho ngày sau;
+7. đã có README riêng cho:
+   - `backend/database`
+   - `terraform/5_database`
+8. đã hiểu rằng Day 1 của Week 4 là nền tảng bắt buộc cho Guide 6 và Guide 7.
+
+## Handoff sang Guide 6
+
+Trước khi sang `guides/6_agents.md`, cần kiểm tra:
+
+1. `backend/database/README.md` đã được đọc chưa;
+2. `terraform/5_database/README.md` đã được đọc chưa;
+3. outputs Part 5 đã được lưu chưa;
+4. test user / test portfolio có cần giữ lại để test agent local/full không;
+5. region của Bedrock, region của Aurora, và region của Lambda sắp deploy có đang được hiểu đúng không.
+
+Guide 6 sẽ bắt đầu phụ thuộc trực tiếp vào các phần sau của Day 1:
+
+- bảng `jobs`
+- bảng `instruments`
+- shared `Database()` facade
+- `AURORA_CLUSTER_ARN`
+- `AURORA_SECRET_ARN`
+
+---
+
 # Template Append Cho Ngày Sau
 
 Mỗi ngày mới nên append theo form này:
@@ -1516,3 +1966,16 @@ Mỗi ngày mới nên append theo form này:
 - Đã ghi rõ implementation thực tế hiện tại dùng Lambda Function URL, không phải App Runner.
 - Đã ghi lại verified-web-only contract, immediate-snapshot strategy, observability events, và benchmark topic set.
 - Đã ghi chú trạng thái còn mở: benchmark `openai/gpt-5.4-nano` vs `openrouter/openai/gpt-oss-120b`.
+
+## Week 4 / Day 1
+
+- Đã append nhật ký cho:
+  - `tai_lieu/week4/day1_summary.md`
+  - `guides/5_database.md`
+  - `backend/database`
+  - `terraform/5_database`
+- Đã ghi rõ Day 1 như một điểm chuyển từ RAG infrastructure sang relational shared state cho multi-agent SaaS.
+- Đã tóm tắt lại lý do chọn Aurora Serverless v2 + Data API, structure của 5 bảng lõi, và quan hệ của Part 5 với Guide 6/7.
+- Đã ghi nhận hai tài liệu reference mới:
+  - `backend/database/README.md`
+  - `terraform/5_database/README.md`

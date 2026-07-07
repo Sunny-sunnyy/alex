@@ -1,12 +1,14 @@
 # Prompt: Tạo README cho folder `terraform/*/`
 
-Copy toàn bộ nội dung bên dưới vào Claude Code. Thay `<FOLDER_PATH>` bằng đường dẫn thực tế (ví dụ: `terraform/5_database`).
+Copy toàn bộ nội dung bên dưới vào Agent Code. Thay `<FOLDER_PATH>` bằng đường dẫn thực tế (ví dụ: `terraform/5_database`).
 
 ---
 
 ## Nhiệm vụ
 
-Tạo file `README.md` chi tiết cho folder `<FOLDER_PATH>`. File phải bằng **tiếng Việt có dấu**, độ dài **dưới 500 dòng**, đầy đủ nhưng súc tích.
+Tạo file `README.md` chi tiết cho folder `<FOLDER_PATH>`. File phải bằng **tiếng Việt có dấu**, mặc định **dưới 600 dòng**, đầy đủ nhưng súc tích.
+
+Nếu sau khi khám phá folder và các part liên quan, bạn thấy folder chứa quá nhiều tài nguyên, dependency hoặc bối cảnh cần thiết và việc ép dưới 600 dòng sẽ làm README mất giá trị học tập hoặc tra cứu, bạn **được phép chủ động hỏi người dùng** để xin viết dài hơn 600 dòng. Nếu người dùng đồng ý, ưu tiên viết **vừa đủ để hiểu đúng** thay vì cắt ngắn máy móc.
 
 ## Quy trình
 
@@ -21,6 +23,17 @@ Phải đọc:
 - `terraform.tfvars.example` hoặc `terraform.tfvars` — giá trị thực tế đang dùng
 - Các file `.auto.tfvars.json` nếu có
 - `.terraform.lock.hcl` — version provider
+
+### Bước 1.5 — Nắm bối cảnh từ các bài học trước có liên quan trực tiếp
+
+Trước khi viết README, bạn phải đọc các **guide** và **folder code/terraform trước đó mà `<FOLDER_PATH>` phụ thuộc thực sự**.
+
+Nguyên tắc:
+- Không cần đọc máy móc tất cả các part trước nếu chúng không liên quan kỹ thuật trực tiếp
+- Phải đọc đủ để hiểu folder Terraform hiện tại đang kế thừa resource, output, hoặc workflow nào từ các part trước
+- Ví dụ: nếu đang viết cho `terraform/5_database`, bạn phải nắm được ít nhất các phần trước liên quan trực tiếp như `terraform/3_ingestion`, `terraform/4_researcher`, cùng các guide tương ứng nếu chúng tạo ra ngữ cảnh kỹ thuật mà Part 5 đang tiếp nối
+
+Bạn có thể tự khám phá các file, folder chứa code khác để hiểu rõ thêm về bài học nếu thấy cần thiết hoặc nếu tôi cung cấp thiếu ngữ cảnh.
 
 ### Bước 2 — Tìm folder backend tương ứng
 
@@ -159,10 +172,12 @@ Liệt kê tất cả resource được tạo + số lượng. Định dạng:
 - **Diagram bắt buộc.** Tối thiểu 2 diagram mermaid: (1) sơ đồ tài nguyên AWS, (2) quan hệ cross-service.
 - **Không lặp lại** thông tin từ `CLAUDE.md` hoặc `gameplan.md` trừ khi cần cho ngữ cảnh.
 - **Không in secret values.** Đánh dấu `sensitive = true` trong output table, không hiển thị giá trị thật.
+- **Phải có bối cảnh theo chuỗi bài học.** README không được mô tả folder Terraform hiện tại như một khối cô lập; phải chỉ ra nó kế thừa gì từ các part trước có liên quan trực tiếp.
 
 #### Ràng buộc kỹ thuật
 
-- Tổng file **dưới 500 dòng**
+- Tổng file **mặc định dưới 600 dòng**
+- Nếu folder nhiều nội dung và việc giới hạn 600 dòng làm giảm chất lượng README, bạn phải **xin phép người dùng** trước khi viết dài hơn 600 dòng
 - Nếu folder backend tương ứng tồn tại → giới hạn mô tả application code trong **1 section ngắn** (dưới 30 dòng), dẫn link đến `backend/*/README.md` để biết chi tiết
 - Nếu có >15 resource → chỉ mô tả chi tiết top 12 resource quan trọng nhất, còn lại gom vào bảng tổng hợp
 - Nếu có locals phức tạp → giải thích ngắn gọn logic điều kiện
@@ -173,6 +188,7 @@ Trước khi ghi, kiểm tra:
 1. Tất cả section bắt buộc đã có mặt?
 2. Tên resource, biến, output có khớp chính xác với `main.tf` / `variables.tf` / `outputs.tf` không?
 3. Các giá trị số (memory, timeout, rate limit...) có đúng không?
-4. Đếm dòng — có vượt 500 không? → Nếu vượt, cắt bớt phần ít quan trọng
-5. Không có TBD, TODO, placeholder nào chưa được thay thế?
-6. Nếu implementation khác guide gốc → đã ghi rõ sự khác biệt chưa?
+4. README đã thể hiện đúng bối cảnh từ các guide/folder trước có liên quan trực tiếp chưa?
+5. Đếm dòng — có vượt 600 không? → Nếu vượt mà chưa được người dùng cho phép, phải hỏi trước khi ghi file
+6. Không có TBD, TODO, placeholder nào chưa được thay thế?
+7. Nếu implementation khác guide gốc → đã ghi rõ sự khác biệt chưa?

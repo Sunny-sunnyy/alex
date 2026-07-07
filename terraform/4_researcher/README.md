@@ -1,378 +1,621 @@
-# `terraform/4_researcher` - Hạ tầng AWS cho Researcher trong Part 4
+# `terraform/4_researcher` — Hạ tầng AWS cho Researcher trong Part 4
 
 Thư mục này chứa toàn bộ **Infrastructure as Code** cho thành phần **Researcher** của Part 4.
 
-Vai trò của thư mục này là biến code trong `backend/researcher` thành một service AWS có thể dùng thật.
+Vai trò: biến code trong `backend/researcher` thành một AI service chạy trên AWS — nhận chủ đề nghiên cứu, dùng LLM + trình duyệt để thu thập thông tin web đã xác minh, và lưu kết quả vào S3 Vectors qua ingest API của Part 3.
 
-Trong implementation hiện tại của repo, thư mục này triển khai:
+---
 
-- ECR repository cho researcher image;
-- Lambda function chạy container image;
-- Lambda Function URL public;
-- IAM roles và policies;
-- scheduler tùy chọn chạy mỗi 2 giờ.
+## Lưu ý quan trọng về implementation hiện tại
 
-Nói ngắn gọn:
+Guide 4 trong một số đoạn vẫn mô tả **App Runner + Bedrock (Nova Pro)**. Tuy nhiên, implementation thực tế trong repo hiện tại là:
 
-- `backend/researcher` là **application code**
-- `terraform/4_researcher` là **lớp hạ tầng AWS** chạy application code đó
+| Mô tả cũ (guide) | Thực tế hiện tại |
+|-----------------|-----------------|
+| App Runner | **AWS Lambda container image** |
+| AWS Bedrock (Nova Pro) | **OpenAI API (`openai/gpt-5.4-nano`)** qua LiteLLM |
+| App Runner URL | **Lambda Function URL** (public HTTPS) |
+| Scheduler 2 giờ | **Scheduler 12 giờ** (`rate(12 hours)`) |
 
-## Thành phần này làm gì?
+Hãy coi file này và `main.tf` là source of truth cho hạ tầng hiện tại của Researcher.
 
-Sau khi hoàn thành Parts 2 và 3, bạn đã có:
+---
 
-- SageMaker endpoint để tạo embedding;
-- ingest pipeline để lưu tài liệu vào vector knowledge base.
+## Mục tiêu
 
-Part 4 cần bổ sung:
+Sau Part 3 (Ingestion Pipeline), Part 4 cần bổ sung:
 
-1. một AI service có thể nghiên cứu chủ đề đầu tư;
-2. một public URL để gọi service đó;
-3. một nơi lưu Docker image;
-4. một scheduler tùy chọn để chạy research tự động.
+1. Một AI service có thể nghiên cứu chủ đề đầu tư qua web browser
+2. Một public URL để gọi service đó (`/health`, `/research`)
+3. Một nơi lưu Docker image (ECR)
+4. Một scheduler tùy chọn để chạy research tự động
 
-Thư mục này giải quyết toàn bộ các yêu cầu đó.
+---
 
-## Lưu ý rất quan trọng về implementation hiện tại
+## Sơ đồ tài nguyên AWS được tạo
 
-Guide 4 trong một số đoạn vẫn mô tả:
+```
+ECR Repository (alex-researcher)
+  │  MUTABLE tags, force_delete=true
+  └─ ECR Repository Policy (Lambda ECR access)
 
-- App Runner
+IAM Role (alex-researcher-lambda-role)
+  ├─ Policy Attachment: AWSLambdaBasicExecutionRole
+  └─ Inline Policy: alex-researcher-lambda-bedrock-policy
+       └─ bedrock:InvokeModel, InvokeModelWithResponseStream, ListFoundationModels
 
-Nhưng implementation thực tế trong repo hiện tại là:
+Lambda Function (alex-researcher)           [chỉ tạo khi researcher_image_uri != ""]
+  │  package_type: Image
+  │  timeout: 300s, memory: 2048MB, ephemeral_storage: 2048MB
+  │  arch: x86_64
+  │  env: OPENAI_API_KEY, OPENROUTER_API_KEY, ALEX_API_ENDPOINT,
+  │       ALEX_API_KEY, BEDROCK_REGION, RESEARCHER_MODEL, MCP_LOGGING
+  │
+  ├─ Lambda Function URL (public, NONE auth)
+  └─ Lambda Permission (public invoke)
 
-- **AWS Lambda container image**
-- **Lambda Function URL**
-- **ECR**
+── [Scheduler - chỉ tạo khi scheduler_enabled && researcher_deployed] ──
 
-Ngoài ra, runtime thực tế hiện tại còn có các đặc điểm quan trọng:
+IAM Role (alex-scheduler-lambda-role)
+  └─ Policy Attachment: AWSLambdaBasicExecutionRole
 
-- model researcher mặc định: `openai/gpt-5.4-nano`
-- policy ingest hiện tại là `verified-web-only`
-  - chỉ ingest khi có `source_url` sạch
-  - fallback note không còn được phép đi vào S3 Vectors
+Lambda Function (alex-researcher-scheduler)
+  │  runtime: python3.12, memory: 256MB, timeout: 180s
+  │  handler: lambda_function.handler
+  │  code: ../../backend/scheduler/lambda_function.zip
+  │  env: APP_RUNNER_URL = <researcher function URL>
 
-Vì vậy khi đọc folder này, hãy coi đây là source of truth cho hạ tầng hiện tại của Researcher.
+IAM Role (alex-eventbridge-scheduler-role)
+  └─ Inline Policy: InvokeLambdaPolicy → scheduler Lambda
 
-## Trạng thái behavior hiện tại của service
+EventBridge Scheduler (alex-research-schedule)
+  │  schedule: rate(12 hours)
+  │  flexible_time_window: OFF
 
-Hạ tầng trong folder này đang chạy một version Researcher với behavior đã được siết qua nhieu pass:
-
-- `/research` khong con la best-effort ingest service
-- verified-web-only gate: nếu browser khong chung minh duoc noi dung web thật → `500`, khong ingest
-- immediate-snapshot constraint: agent phai snapshot ngay sau navigate, khong co hanh dong trung gian
-- 3-source limit: Investopedia → AP News → CNN Business, dung sau 3 source neu tat ca fail
-- drift detection: `_detect_drifted_snapshot()` phat hien about:blank/about:srcdoc/client-storage
-- snapshot URL logging: `snapshot_page_url` trong CloudWatch de truy vet
-- `browser_run` status: `article_captured` / `page_drifted` / `ok` / `max_turns` / `error`
-
-Điều này là chủ ý để giữ knowledge base sạch hơn va co evidence ro rang ve browser behavior.
-
-## Các file trong thư mục
-
-### File Terraform chính
-
-#### `main.tf`
-
-Đây là file quan trọng nhất của thư mục.
-
-Nó định nghĩa các resource chính:
-
-- provider AWS;
-- data source lấy account hiện tại;
-- ECR repository;
-- ECR repository policy;
-- IAM role cho researcher Lambda;
-- policy log cơ bản cho Lambda;
-- policy Bedrock access;
-- researcher Lambda function;
-- Lambda Function URL;
-- public invoke permission;
-- scheduler role;
-- scheduler Lambda;
-- EventBridge Scheduler;
-- permission để schedule invoke Lambda.
-
-Nếu bạn chỉ đọc một file để hiểu hạ tầng Researcher hoạt động thế nào, hãy đọc `main.tf`.
-
-### File biến đầu vào
-
-#### `variables.tf`
-
-File này khai báo toàn bộ input variable cho Part 4.
-
-Các biến quan trọng:
-
-- `aws_region`
-- `openai_api_key`
-- `openrouter_api_key`
-- `alex_api_endpoint`
-- `alex_api_key`
-- `scheduler_enabled`
-- `researcher_image_uri`
-- `bedrock_region`
-- `researcher_model`
-- `mcp_logging`
-
-Đây là nơi định nghĩa:
-
-- Terraform cần nhận cấu hình gì;
-- biến nào nhạy cảm;
-- biến nào có default.
-
-### File output
-
-#### `outputs.tf`
-
-File này xuất các giá trị quan trọng sau deploy.
-
-Các output chính:
-
-- `ecr_repository_url`
-- `researcher_url`
-- `researcher_function_name`
-- `scheduler_status`
-- `setup_instructions`
-
-Những output này phục vụ cho:
-
-- script deploy;
-- test script;
-- người dùng cần copy/paste URL hoặc xác nhận trạng thái scheduler.
-
-### File biến mẫu
-
-#### `terraform.tfvars.example`
-
-Đây là file mẫu để tạo `terraform.tfvars`.
-
-Mục tiêu:
-
-- cho người học biết cần điền biến gì;
-- tách cấu hình cá nhân khỏi logic hạ tầng.
-
-Thông thường sẽ làm:
-
-```bash
-cp terraform.tfvars.example terraform.tfvars
+Lambda Permission (AllowExecutionFromEventBridge)
 ```
 
-rồi điền:
+---
 
-- region;
-- OpenAI API key;
-- ingest endpoint;
-- ingest API key;
-- scheduler flag.
+## Điều kiện kích hoạt (locals)
 
-### File cấu hình runtime thực tế
+| Local | Công thức | Ý nghĩa |
+|-------|----------|---------|
+| `researcher_deployed` | `var.researcher_image_uri != ""` | Researcher Lambda chỉ được tạo khi đã có image URI |
+| `scheduler_active` | `var.scheduler_enabled && local.researcher_deployed` | Scheduler chỉ được tạo khi cả 2 điều kiện đều đúng |
 
-#### `terraform.tfvars`
+Điều này cho phép Terraform được apply một phần trước (tạo ECR + IAM role) rồi deploy Lambda sau khi image đã build và push.
 
-Đây là file cấu hình thật của môi trường hiện tại.
+---
 
-Nó thường chứa:
+## Chi tiết từng tài nguyên AWS
 
-- region thật;
-- API key thật;
-- ingest endpoint thật;
-- các cờ cấu hình đang dùng.
+### 1. ECR Repository — `alex-researcher`
 
-Không nên commit nội dung nhạy cảm của file này.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | **`alex-researcher`** |
+| Image Tag Mutability | **MUTABLE** |
+| Force Delete | **true** |
+| Scan On Push | **false** |
+| Tags | `Project=alex`, `Part=4` |
 
-#### `researcher.auto.tfvars.json`
+### 2. ECR Repository Policy — Lambda Access
 
-File này thường được script `backend/researcher/deploy.py` ghi tự động.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Principal | `lambda.amazonaws.com` |
+| Actions | `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` |
+| Condition | `ArnLike.aws:sourceArn` = Lambda functions trong account |
 
-Nhiệm vụ:
+Cho phép Lambda pull image layers từ ECR.
 
-- truyền `researcher_image_uri` mới nhất vào Terraform;
-- giúp Terraform biết image nào cần deploy/update.
+### 3. IAM Role — `alex-researcher-lambda-role`
 
-Lưu ý:
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-researcher-lambda-role` |
+| Trust Policy | Cho phép `lambda.amazonaws.com` assume role (`sts:AssumeRole`) |
+| Tags | `Project=alex`, `Part=4` |
 
-- file này được commit trong repo hiện tại để phản ánh image đang chạy thật trên Lambda
-- trước khi sửa code mới, nên kiểm tra diff của file này để tránh hiểu nhầm image production đang active
+**Policies gắn vào role này:**
 
-### File lock provider
+#### a) `AWSLambdaBasicExecutionRole` (managed)
 
-#### `.terraform.lock.hcl`
+Policy managed của AWS, cấp quyền ghi log CloudWatch cơ bản.
 
-File do Terraform sinh ra để khóa version provider.
+#### b) `alex-researcher-lambda-bedrock-policy` (inline)
 
-Vai trò:
+| Action | Resource |
+|--------|----------|
+| `bedrock:InvokeModel` | `*` |
+| `bedrock:InvokeModelWithResponseStream` | `*` |
+| `bedrock:ListFoundationModels` | `*` |
 
-- giữ môi trường Terraform ổn định;
-- tránh thay đổi provider bất ngờ.
+Policy này giữ quyền Bedrock cho runtime cũ hoặc khi cần debug AWS model access.
 
-Thông thường không sửa tay.
+### 4. Lambda Function — `alex-researcher`
 
-### File state
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Function Name | **`alex-researcher`** |
+| Package Type | **Image** (container) |
+| Image URI | Từ `var.researcher_image_uri` |
+| IAM Role | `alex-researcher-lambda-role` |
+| Timeout | **300 giây** (5 phút) |
+| Memory | **2048 MB** |
+| Architecture | **x86_64** |
+| Ephemeral Storage | **2048 MB** |
+| Tags | `Project=alex`, `Part=4` |
 
-#### `terraform.tfstate`
+| Condition | Chỉ tạo khi `researcher_image_uri != ""` |
 
-Local state chính của Part 4.
+**Environment Variables của Researcher Lambda:**
 
-Nhiệm vụ:
-
-- ghi nhớ resource nào đã tạo;
-- lưu ID, ARN, URL, dependency thực tế;
-- giúp `terraform apply` và `terraform destroy` hoạt động đúng.
-
-#### `terraform.tfstate.backup`
-
-Bản backup của local state.
-
-## Các thành phần AWS mà thư mục này tạo ra
-
-### 1. ECR Repository
-
-Resource:
-
-- `aws_ecr_repository.researcher`
-
-Vai trò:
-
-- lưu Docker image của Researcher;
-- là nơi `deploy.py` push image lên trước khi Terraform deploy Lambda.
-
-Tên repository:
-
-- `alex-researcher`
-
-### 2. ECR Repository Policy
-
-Resource:
-
-- `aws_ecr_repository_policy.researcher_lambda_access`
-
-Vai trò:
-
-- cho phép Lambda pull image layers từ ECR.
-
-### 3. IAM Role cho Researcher Lambda
-
-Resource:
-
-- `aws_iam_role.researcher_lambda_role`
-
-Vai trò:
-
-- là danh tính AWS của researcher Lambda.
-
-Nó được gắn thêm:
-
-- policy log cơ bản;
-- policy Bedrock access.
-
-### 4. Researcher Lambda Function
-
-Resource:
-
-- `aws_lambda_function.researcher`
-
-Đây là compute chính của Part 4.
-
-Nó:
-
-- dùng `package_type = "Image"`
-- chạy image từ ECR
-- inject biến môi trường cho runtime
-- chạy FastAPI app trong container
-- đang chạy một runtime đã được sửa để enforce verified-web-only behavior + immediate-snapshot constraint + drift detection
-
-Lưu ý:
-
-resource này chỉ được tạo khi:
-
-- `researcher_image_uri` không rỗng
-
-Điều đó có nghĩa là Terraform có thể được apply một phần trước để tạo ECR/role, rồi sau đó mới deploy Lambda sau khi image đã được build.
+| Biến | Nguồn | Mô tả |
+|------|-------|-------|
+| `OPENAI_API_KEY` | `var.openai_api_key` | API key cho model OpenAI (GPT) |
+| `OPENROUTER_API_KEY` | `var.openrouter_api_key` | API key cho OpenRouter (dùng model thay thế) |
+| `ALEX_API_ENDPOINT` | `var.alex_api_endpoint` | URL endpoint ingest từ Part 3 |
+| `ALEX_API_KEY` | `var.alex_api_key` | API key ingest từ Part 3 |
+| `BEDROCK_REGION` | `var.bedrock_region` | Region cho Bedrock inference (mặc định: `ap-southeast-1`) |
+| `RESEARCHER_MODEL` | `var.researcher_model` | Model identifier (mặc định: `openai/gpt-5.4-nano`) |
+| `MCP_LOGGING` | `var.mcp_logging` | Bật/tắt logging MCP Playwright (mặc định: `"False"`) |
 
 ### 5. Lambda Function URL
 
-Resource:
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Function | `alex-researcher` |
+| Authorization Type | **NONE** (public) |
 
-- `aws_lambda_function_url.researcher`
+Đây là URL HTTPS công khai dùng để gọi `/health` và `/research`.
 
-Vai trò:
+### 6. Lambda Permission — Public Invoke
 
-- tạo public HTTPS URL cho Researcher service.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Statement ID | `AllowPublicFunctionInvokeViaUrl` |
+| Action | `lambda:InvokeFunction` |
+| Principal | `*` |
+| Invoked Via Function URL | `true` |
 
-Đây là URL mà:
+---
 
-- `test_research.py` gọi `/health` và `/research`
-- người dùng có thể test trực tiếp bằng `curl`
+### 7-12. Scheduler Resources (chỉ tạo khi `scheduler_active = true`)
 
-### 6. Public Invoke Permission
+#### 7. IAM Role — `alex-scheduler-lambda-role`
 
-Resource:
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-scheduler-lambda-role` |
+| Trust Policy | `lambda.amazonaws.com` |
+| Policy Attached | `AWSLambdaBasicExecutionRole` |
+| Tags | `Project=alex`, `Part=4` |
 
-- `aws_lambda_permission.allow_public_function_url_invoke`
+#### 8. Lambda Function — `alex-researcher-scheduler`
 
-Vai trò:
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Function Name | **`alex-researcher-scheduler`** |
+| Runtime | **python3.12** |
+| Handler | `lambda_function.handler` |
+| Memory | **256 MB** |
+| Timeout | **180 giây** |
+| Code Source | `../../backend/scheduler/lambda_function.zip` |
+| Tags | `Project=alex`, `Part=4` |
 
-- cho phép public access qua Function URL.
+| Environment Variable | Giá trị |
+|---------------------|--------|
+| `APP_RUNNER_URL` | Researcher Function URL (đã strip trailing `/`) |
 
-### 7. Scheduler Lambda
+Scheduler Lambda là lớp trung gian gọi Researcher theo lịch, cần thiết vì research có thể chạy lâu hơn timeout của một số integration trực tiếp.
 
-Resource:
+#### 9. IAM Role — `alex-eventbridge-scheduler-role`
 
-- `aws_lambda_function.scheduler_lambda`
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-eventbridge-scheduler-role` |
+| Trust Policy | `scheduler.amazonaws.com` |
+| Tags | `Project=alex`, `Part=4` |
 
-Vai trò:
+#### 10. Inline Policy — `InvokeLambdaPolicy` (gắn vào eventbridge role)
 
-- gọi Researcher service theo lịch;
-- là lớp trung gian giữa EventBridge Scheduler và Researcher URL.
+| Action | Resource |
+|--------|----------|
+| `lambda:InvokeFunction` | ARN của `alex-researcher-scheduler` |
 
-Nó chỉ được tạo khi:
+#### 11. EventBridge Scheduler — `alex-research-schedule`
 
-- `scheduler_enabled = true`
-- và researcher đã deploy xong.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | **`alex-research-schedule`** |
+| Schedule Expression | **`rate(12 hours)`** |
+| Flexible Time Window | **OFF** |
+| Target ARN | `alex-researcher-scheduler` Lambda |
+| Target Role | `alex-eventbridge-scheduler-role` |
 
-### 8. EventBridge Scheduler
+#### 12. Lambda Permission — `AllowExecutionFromEventBridge`
 
-Resource:
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Statement ID | `AllowExecutionFromEventBridge` |
+| Action | `lambda:InvokeFunction` |
+| Principal | `scheduler.amazonaws.com` |
+| Source ARN | `alex-research-schedule` |
 
-- `aws_scheduler_schedule.research_schedule`
+---
 
-Vai trò:
+## IAM Roles và Policies — tổng hợp
 
-- chạy automated research theo lịch `rate(2 hours)`.
+| Resource | Name | Type | Policies |
+|----------|------|------|----------|
+| `aws_iam_role` | `alex-researcher-lambda-role` | Lambda execution | `AWSLambdaBasicExecutionRole` (managed) + `alex-researcher-lambda-bedrock-policy` (inline) |
+| `aws_iam_role` | `alex-scheduler-lambda-role` | Lambda execution | `AWSLambdaBasicExecutionRole` (managed) |
+| `aws_iam_role` | `alex-eventbridge-scheduler-role` | Scheduler execution | `InvokeLambdaPolicy` (inline) |
 
-## Trạng thái deploy gần đây
+---
 
-`uv run deploy.py` hiện đang deploy được lại.
+## Environment Variables tổng hợp
 
-Flow hiện tại:
+### Researcher Lambda (`alex-researcher`)
 
-1. Terraform tạo/refresh ECR + IAM prerequisites
-2. `deploy.py` build image mới
-3. image được push lên ECR
-4. `researcher.auto.tfvars.json` được cập nhật
-5. Terraform update Lambda image (neu Terraform crash: fallback `aws lambda update-function-code --image-uri ...`)
-6. script chờ Lambda active rồi in Function URL
+| Biến | Nguồn | Mặc định |
+|------|-------|----------|
+| `OPENAI_API_KEY` | `var.openai_api_key` | *(bắt buộc)* |
+| `OPENROUTER_API_KEY` | `var.openrouter_api_key` | *(bắt buộc)* |
+| `ALEX_API_ENDPOINT` | `var.alex_api_endpoint` | *(bắt buộc)* |
+| `ALEX_API_KEY` | `var.alex_api_key` | *(bắt buộc)* |
+| `BEDROCK_REGION` | `var.bedrock_region` | `"ap-southeast-1"` |
+| `RESEARCHER_MODEL` | `var.researcher_model` | `"openai/gpt-5.4-nano"` |
+| `MCP_LOGGING` | `var.mcp_logging` | `"False"` |
 
-Các image tag live gần đây đã được dùng trong quá trình verify gồm:
+### Scheduler Lambda (`alex-researcher-scheduler`)
 
-- `deploy-1783267083` — verified-web-only enforcement
-- `deploy-1783267341` — anti-fabrication prompt pass
-- `deploy-1783267702` — runtime experiment bỏ `--single-process` (inconclusive)
-- `deploy-1783329777` — immediate-snapshot strategy + drift detection (active, 2026-07-06)
+| Biến | Nguồn | Mô tả |
+|------|-------|-------|
+| `APP_RUNNER_URL` | `trimsuffix(function_url, "/")` | Researcher Function URL (để gọi `/research`) |
 
-## Điều đã được chứng minh và chưa được chứng minh
+---
 
-Đã được chứng minh:
+## Outputs sau khi triển khai
 
-- deploy path bằng `uv run deploy.py` hiện hoạt động (thinh thoang Terraform AWS provider crash "Plugin did not respond" — fallback: `aws lambda update-function-code`)
-- Function URL, ECR, và Lambda update flow hoạt động
-- service có thể fail đúng theo verified-web-only contract (4/5 topic)
-- **browser-based `success_verified` đã có bằng chứng reproducible** (NVIDIA AI datacenter demand, Investopedia, 2/2 lan pass 2026-07-06)
-- immediate-snapshot strategy giúp capture article content trước khi JavaScript redirects gây drift
-- `browser_run` status `article_captured` + `snapshot_page_url` log hoat dong trong CloudWatch
+| Output | Giá trị | Mô tả |
+|--------|--------|-------|
+| `ecr_repository_url` | `<account>.dkr.ecr.<region>.amazonaws.com/alex-researcher` | ECR repository URL |
+| `researcher_url` | `https://<lambda-id>.lambda-url.<region>.on.aws/` | Public HTTPS URL của researcher |
+| `researcher_function_name` | `alex-researcher` | Tên Lambda function |
+| `scheduler_status` | `"Enabled - Running every 12 hours"` / `"Disabled"` / `"Disabled - deploy the researcher image first"` | Trạng thái scheduler |
+| `setup_instructions` | (text hướng dẫn) | Hướng dẫn test `/health` và trạng thái scheduler |
 
-Chưa được chứng minh:
+---
 
-- `success_verified` ổn định trên toan bo 5-topic benchmark (chi 1/5)
-- clean article extraction ổn định từ source AP News hoặc CNN Business (chi Investopedia pass)
-- browser path ổn định cho cac topic khac ngoai NVIDIA
+## Các biến cần điền trong `terraform.tfvars`
+
+Copy từ `terraform.tfvars.example` và điền giá trị thực tế:
+
+| Biến | Mô tả | Mặc định | Sensitive |
+|------|-------|----------|-----------|
+| `aws_region` | AWS region để deploy resource | *(bắt buộc)* | No |
+| `openai_api_key` | OpenAI API key cho researcher agent | *(bắt buộc)* | **Yes** |
+| `openrouter_api_key` | OpenRouter API key | *(bắt buộc)* | **Yes** |
+| `alex_api_endpoint` | URL endpoint ingest từ Part 3 | *(bắt buộc)* | No |
+| `alex_api_key` | API key ingest từ Part 3 | *(bắt buộc)* | **Yes** |
+| `scheduler_enabled` | Bật/tắt automated research | `false` | No |
+| `researcher_image_uri` | Full ECR image URI (để trống nếu chưa build) | `""` | No |
+| `bedrock_region` | Region cho Bedrock inference | `"ap-southeast-1"` | No |
+| `researcher_model` | Model identifier cho researcher | `"openai/gpt-5.4-nano"` | No |
+| `mcp_logging` | Bật/tắt MCP Playwright logging (`"True"` / `"False"`) | `"False"` | No |
+
+### File `researcher.auto.tfvars.json`
+
+File này được script `backend/researcher/deploy.py` tự động ghi sau khi build và push image. Ví dụ nội dung hiện tại:
+
+```json
+{
+  "researcher_image_uri": "487592470523.dkr.ecr.ap-southeast-1.amazonaws.com/alex-researcher:deploy-1783346445"
+}
+```
+
+Lưu ý: file này được commit trong repo để phản ánh image đang chạy thật. Trước khi sửa code, nên kiểm tra diff của file này.
+
+---
+
+## Version Constraints
+
+| Thành phần | Version |
+|-----------|---------|
+| Terraform CLI | `>= 1.5` |
+| AWS Provider (`hashicorp/aws`) | `>= 6.28.0` |
+| Backend | Local (`terraform.tfstate` trong thư mục này) |
+
+---
+
+## Quan hệ với các phần khác của project
+
+```
+terraform/3_ingestion (ingest API + API key)
+       │
+       │  ALEX_API_ENDPOINT, ALEX_API_KEY
+       ▼
+backend/researcher (code Python: server.py, context.py, tools.py, mcp_servers.py)
+       │
+       │  Dockerfile → ECR image
+       ▼
+terraform/4_researcher (thư mục này — hạ tầng AWS)
+       │
+       │  researcher_url (Function URL)
+       ▼
+Người dùng / Scheduler
+       │
+       │  gọi /health, /research
+       ▼
+Researcher → gọi ingest API → S3 Vectors (knowledge base)
+```
+
+### Phụ thuộc vào
+
+- `terraform/3_ingestion` — cần `api_endpoint` và `api_key_value` để researcher lưu kết quả
+- `backend/researcher` — Docker image phải được build và push lên ECR trước khi deploy Lambda
+- `backend/scheduler/lambda_function.zip` — phải tồn tại nếu bật scheduler
+
+### Được dùng bởi
+
+- `terraform/6_agents` — Planner agent sẽ query S3 Vectors (nơi researcher lưu kết quả)
+- Người dùng — gọi trực tiếp `/research` để test
+- EventBridge Scheduler — tự động gọi research mỗi 12 giờ
+
+---
+
+## Behavior runtime hiện tại của Researcher
+
+Hạ tầng này đang chạy một phiên bản Researcher với behavior đã được siết qua nhiều pass:
+
+### Verified-Web-Only Contract
+
+`/research` trả về **200** chỉ khi:
+- Agent thu được nội dung từ trang bài viết thực
+- Ghi chú cuối cùng có dòng `Source URL: https://...` sạch sẽ
+- `ingest_financial_document()` ghi nhận ingest thành công
+- Nội dung không phải fallback/kiến thức chung
+
+`/research` trả về **500** khi:
+- Không thu được nội dung web đã xác minh
+- Trang không khả dụng, bị chặn, hoặc đã thay đổi
+- Agent không thể ghi nhận source URL sạch sẽ
+- Ghi chú trông giống kiến thức dự phòng
+- Ingest từ chối tài liệu
+
+### Immediate-Snapshot Strategy
+
+1. Khám phá URL bài viết thực qua kết quả tìm kiếm/điều hướng
+2. Điều hướng đến URL bài viết
+3. Gọi ngay `browser_snapshot` (không click, scroll, type)
+4. Nếu trang là `about:blank`, `about:srcdoc`, client-storage, ad-tech → chuyển nguồn
+5. Thử tối đa 3 loại nguồn: Investopedia → AP News → CNN Business
+6. Dừng nếu cả 3 thất bại
+
+### Browser Phase Statuses
+
+| Status | Ý nghĩa |
+|--------|---------|
+| `article_captured` | Response có source URL sạch, browser phase hoàn thành |
+| `page_drifted` | Response chứa drift markers (`about:blank`, `about:srcdoc`, `client-storage`, `optimizely`, `doubleclick`, `googlesyndication`) |
+| `ok` | Browser phase hoàn thành nhưng không chứng minh được article capture |
+| `max_turns` | OpenAI Agents SDK đạt giới hạn lượt |
+| `error` | Ngoại lệ không mong đợi |
+
+### Request Outcomes
+
+| Outcome | Ý nghĩa |
+|---------|---------|
+| `success_verified` | Nội dung web đã xác minh đã được ingest |
+| `failed_browser` | Browser hoặc cổng xác minh thất bại |
+| `failed_ingest` | Công cụ ingest trả về thất bại |
+| `failed_unknown` | Không thể phân loại |
+
+---
+
+## Trạng thái đã chứng minh và chưa chứng minh
+
+### Đã chứng minh
+
+- Deploy path bằng `uv run deploy.py` hoạt động
+- Function URL, ECR, Lambda update flow hoạt động
+- Service fail đúng theo verified-web-only contract (4/5 topic)
+- **Browser-based `success_verified` đã có bằng chứng reproducible**: NVIDIA AI datacenter demand, Investopedia, 2/2 lần pass (2026-07-06)
+- Immediate-snapshot strategy giúp capture article content trước khi JavaScript redirects
+- `browser_run` status `article_captured` + `snapshot_page_url` log hoạt động trong CloudWatch
+
+### Chưa chứng minh
+
+- `success_verified` ổn định trên toàn bộ 5-topic benchmark (chỉ 1/5)
+- Clean article extraction ổn định từ AP News hoặc CNN Business (chỉ Investopedia pass)
+- Browser path ổn định cho các topic khác ngoài NVIDIA
+
+---
+
+## Cách sử dụng nhanh
+
+### Bước 1: Cấu hình Terraform
+
+```bash
+cd terraform/4_researcher
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Chỉnh `terraform.tfvars`:
+
+```hcl
+aws_region        = "ap-southeast-1"
+openai_api_key    = "<your-openai-key>"
+openrouter_api_key = "<your-openrouter-key>"
+alex_api_endpoint = "<ingest-endpoint-from-part-3>"
+alex_api_key      = "<ingest-api-key-from-part-3>"
+scheduler_enabled = false
+bedrock_region    = "ap-southeast-1"
+researcher_model  = "openai/gpt-5.4-nano"
+```
+
+### Bước 2: Tạo ECR + IAM role (chưa có Lambda)
+
+```bash
+terraform init
+terraform apply
+```
+
+(Lúc này `researcher_image_uri` còn rỗng nên Lambda chưa được tạo.)
+
+### Bước 3: Build, push và deploy toàn bộ
+
+```bash
+cd ../../backend/researcher
+uv run deploy.py
+```
+
+Script này sẽ:
+1. Build Docker image
+2. Push lên ECR
+3. Ghi `researcher.auto.tfvars.json`
+4. Chạy `terraform apply` để tạo/update Lambda
+5. In ra Function URL
+
+### Bước 4: Kiểm tra health
+
+```bash
+curl <researcher_url>/health
+```
+
+### Bước 5: Test research
+
+```bash
+uv run test_research.py "NVIDIA AI datacenter demand"
+```
+
+### Bước 6: Kiểm tra log
+
+```bash
+aws logs tail /aws/lambda/alex-researcher --since 15m --region ap-southeast-1
+```
+
+Lọc log benchmark:
+
+```bash
+aws logs tail /aws/lambda/alex-researcher --since 15m --region ap-southeast-1 | rg "research_run|research_ingest|snapshot_page_url"
+```
+
+---
+
+## Các file trong thư mục
+
+| File | Vai trò |
+|------|--------|
+| `main.tf` | Định nghĩa toàn bộ resource AWS (ECR, Lambda, Function URL, IAM, Scheduler, EventBridge) |
+| `variables.tf` | Khai báo 9 biến đầu vào (region, keys, endpoint, model, scheduler flag, etc.) |
+| `outputs.tf` | Xuất `ecr_repository_url`, `researcher_url`, `researcher_function_name`, `scheduler_status`, `setup_instructions` |
+| `terraform.tfvars.example` | File mẫu để copy thành `terraform.tfvars` |
+| `terraform.tfvars` | File cấu hình thật của môi trường bạn *(không commit)* |
+| `researcher.auto.tfvars.json` | File tự động ghi bởi `deploy.py`, chứa image URI hiện tại *(có commit)* |
+| `.terraform.lock.hcl` | Khóa version provider, do Terraform tự sinh |
+| `terraform.tfstate` | Local state chính — ghi nhớ resource đã tạo *(không sửa tay)* |
+| `terraform.tfstate.backup` | Backup của state |
+
+---
+
+## Các file code backend tương ứng
+
+| File trong `backend/researcher/` | Vai trò |
+|----------------------------------|--------|
+| `server.py` | FastAPI app, model setup, agent run orchestration, verified-web gate, phase logs |
+| `context.py` | Agent instructions, source preference, immediate-snapshot rule |
+| `tools.py` | Ingest tool, source URL validation, degraded-content rejection, ingest telemetry |
+| `mcp_servers.py` | Playwright MCP setup và Chromium/container args |
+| `test_research.py` | Deployed end-to-end test script và terminal summary |
+| `deploy.py` | Docker build, ECR push, Terraform apply, Lambda deployment |
+| `Dockerfile` | Lambda container image với Playwright MCP, Chromium, uv, FastAPI, Lambda Web Adapter |
+| `pyproject.toml` | uv project dependencies |
+
+---
+
+## Deploy flow chi tiết
+
+```
+1. terraform apply (khởi tạo)
+   └─ Tạo ECR repo + IAM roles
+   └─ Lambda CHƯA được tạo (researcher_image_uri = "")
+
+2. uv run deploy.py (trong backend/researcher)
+   ├─ docker build -t alex-researcher:deploy-<timestamp> .
+   ├─ docker tag + push lên ECR
+   ├─ Ghi researcher.auto.tfvars.json với image URI mới
+   ├─ terraform apply (cập nhật Lambda image)
+   └─ In Function URL
+
+3. Nếu Terraform crash ("Plugin did not respond"):
+   └─ Fallback: aws lambda update-function-code --image-uri <uri>
+```
+
+---
+
+## Lưu ý quan trọng
+
+1. **Đây là local-state Terraform** — state nằm ngay trong thư mục, không dùng remote backend.
+2. **Terraform không tự build Docker image** — phải dùng `uv run deploy.py` trong `backend/researcher`.
+3. **Docker phải đang chạy** để build và push image.
+4. **Lambda chỉ được tạo khi có `researcher_image_uri`** — nếu image URI rỗng, Terraform chỉ tạo ECR + role.
+5. **Schedule interval hiện tại là 12 giờ** (`rate(12 hours)`), không phải 2 giờ như mô tả trong một số tài liệu cũ.
+6. **`researcher.auto.tfvars.json` được commit** — phản ánh image production đang active.
+7. **Không in secret values** từ `.env`, `terraform.tfvars`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ALEX_API_KEY`.
+8. **Repo có thể chứa local dirty Terraform changes** — không ghi đè trừ khi được yêu cầu rõ ràng.
+
+---
+
+## An toàn Secrets
+
+Không in hoặc tóm tắt giá trị từ:
+- `.env`
+- `terraform.tfvars`
+- `OPENAI_API_KEY`
+- `OPENROUTER_API_KEY`
+- `ALEX_API_KEY`
+
+Có thể xác minh an toàn các trường không nhạy cảm:
+
+```bash
+aws lambda get-function-configuration \
+  --function-name alex-researcher \
+  --region ap-southeast-1 \
+  --query 'Environment.Variables.RESEARCHER_MODEL' \
+  --output text
+```
+
+Tránh dump toàn bộ biến môi trường Lambda vì có thể làm lộ khóa.
+
+---
+
+## Tóm tắt
+
+`terraform/4_researcher` tạo ra **hạ tầng AI Research Agent** hoàn chỉnh:
+
+**Luôn được tạo:**
+- **1 ECR Repository** (`alex-researcher`) — MUTABLE tags, force delete, có policy cho Lambda access
+- **1 IAM Role** (`alex-researcher-lambda-role`) — `AWSLambdaBasicExecutionRole` + Bedrock inline policy
+
+**Tạo khi có image URI (`researcher_image_uri != ""`):**
+- **1 Lambda Function** (`alex-researcher`) — container image, 300s timeout, 2048MB memory, 2048MB ephemeral storage
+- **1 Function URL** — public HTTPS, NONE auth
+- **1 Lambda Permission** — public invoke qua Function URL
+
+**Tạo khi scheduler được bật (`scheduler_enabled && researcher_deployed`):**
+- **1 IAM Role** (`alex-scheduler-lambda-role`) — `AWSLambdaBasicExecutionRole`
+- **1 Lambda Function** (`alex-researcher-scheduler`) — python3.12, 256MB, 180s
+- **1 IAM Role** (`alex-eventbridge-scheduler-role`) — cho phép scheduler invoke Lambda
+- **1 EventBridge Scheduler** (`alex-research-schedule`) — `rate(12 hours)`
+- **1 Lambda Permission** — cho phép EventBridge invoke scheduler Lambda
+
+**Cấu hình runtime:**
+- Model mặc định: `openai/gpt-5.4-nano`
+- Behavior: verified-web-only, immediate-snapshot, 3-source limit, drift detection
+- 7 biến môi trường cho researcher Lambda, 1 biến cho scheduler Lambda
+- 5 outputs
+- 9 biến đầu vào (4 sensitive)

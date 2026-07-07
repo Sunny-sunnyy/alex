@@ -1,506 +1,231 @@
-# `terraform/2_sagemaker` - Hạ tầng SageMaker Embedding cho Part 2
+# `terraform/2_sagemaker` — Hạ tầng SageMaker Embedding cho Part 2
 
 Thư mục này chứa toàn bộ **Infrastructure as Code** cho **Part 2 - SageMaker Serverless Deployment** của dự án Alex.
 
-Vai trò của thư mục này là tạo ra một **SageMaker Serverless Endpoint** có thể:
+Vai trò: tạo một **SageMaker Serverless Endpoint** nhận văn bản đầu vào, tải model embedding từ Hugging Face và sinh ra vector embedding 384 chiều, phục vụ semantic search / RAG ở các phần sau.
 
-- nhận văn bản đầu vào;
-- tải model embedding từ Hugging Face;
-- sinh ra vector embedding 384 chiều;
-- phục vụ cho các bước semantic search / RAG ở các phần sau.
+---
 
-Nói ngắn gọn: nếu Part 3 cần một nơi để biến `text -> vector`, thì `terraform/2_sagemaker` chính là phần hạ tầng tạo ra "nhà máy vector" đó.
+## Mục tiêu
 
-## Mục tiêu của thư mục này
+Sau Guide 1 (Permissions), Guide 2 cần tạo ra:
 
-Sau Guide 1, bạn đã có:
+1. IAM role cho SageMaker
+2. SageMaker model sử dụng Hugging Face inference container
+3. Endpoint configuration kiểu serverless
+4. Endpoint thực tế để backend/CLI gọi
 
-- AWS account;
-- IAM permissions;
-- CLI và Terraform sẵn sàng.
+---
 
-Guide 2 cần tạo ra:
+## Sơ đồ tài nguyên AWS được tạo
 
-1. một IAM role để SageMaker được phép chạy model;
-2. một SageMaker model sử dụng Hugging Face inference container;
-3. một endpoint configuration theo kiểu serverless;
-4. một endpoint thực tế để backend hoặc CLI có thể gọi.
-
-Thư mục này thực hiện toàn bộ các bước đó.
-
-## Thư mục này tạo gì trên AWS?
-
-Khi chạy `terraform apply`, thư mục này sẽ tạo các thành phần chính sau:
-
-### 1. IAM Role cho SageMaker
-
-SageMaker không thể tự chạy trong tài khoản AWS của bạn nếu không có role phù hợp.
-
-Role này cho phép dịch vụ:
-
-- assume role;
-- dùng quyền cần thiết để tạo và chạy model.
-
-### 2. SageMaker Model
-
-Đây là phần khai báo model inference.
-
-Nó không chứa model file ngay trong repo.
-Thay vào đó, nó mô tả cho SageMaker biết:
-
-- dùng container nào;
-- khi container khởi động thì tải model nào từ Hugging Face;
-- task inference là gì.
-
-### 3. SageMaker Endpoint Configuration
-
-Đây là cấu hình cách endpoint sẽ chạy.
-
-Trong project này, endpoint được cấu hình:
-
-- theo kiểu **serverless**;
-- có `memory_size_in_mb = 3072`;
-- có `max_concurrency = 2`.
-
-### 4. SageMaker Endpoint
-
-Đây là endpoint thực tế mà các thành phần khác sẽ gọi.
-
-Sau khi deploy xong, endpoint này thường có tên:
-
-```text
-alex-embedding-endpoint
+```
+IAM Role (alex-sagemaker-role)
+  └─ Policy Attachment (AmazonSageMakerFullAccess)
+       │
+       ▼
+SageMaker Model (alex-embedding-model)
+  │  image: HuggingFace inference container
+  │  env:   HF_MODEL_ID, HF_TASK
+  │
+  ▼
+Endpoint Configuration (alex-embedding-serverless-config)
+  │  serverless: memory=3072MB, max_concurrency=2
+  │
+  ▼
+time_sleep (15s) — chờ IAM propagate
+  │
+  ▼
+SageMaker Endpoint (alex-embedding-endpoint)
+  └─ InService → có thể gọi từ backend/CLI
 ```
 
-Chính endpoint này sẽ được:
+---
 
-- CLI test ở Guide 2 gọi trực tiếp;
-- `backend/ingest` trong Guide 3 gọi để tạo embedding;
-- lưu tên vào `.env` dưới biến `SAGEMAKER_ENDPOINT`.
+## Chi tiết từng tài nguyên AWS
 
-### 5. `time_sleep` workaround
+### 1. IAM Role — `alex-sagemaker-role`
 
-Đây không phải tài nguyên nghiệp vụ.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-sagemaker-role` |
+| Trust Policy | Cho phép `sagemaker.amazonaws.com` assume role (Action: `sts:AssumeRole`) |
+| Policy Attached | `arn:aws:iam::aws:policy/AmazonSageMakerFullAccess` |
 
-Nó chỉ là một resource hỗ trợ nhằm giải quyết vấn đề:
+Đây là danh tính AWS của SageMaker. Nếu không có role hợp lệ, bước tạo model hoặc endpoint sẽ thất bại.
 
-- IAM role vừa tạo xong;
-- policy vừa attach xong;
-- nhưng SageMaker gọi quá sớm nên AWS chưa kịp propagate quyền.
+### 2. SageMaker Model — `alex-embedding-model`
 
-## Các file trong thư mục
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-embedding-model` |
+| Execution Role | `alex-sagemaker-role` |
+| Container Image | `763104351884.dkr.ecr.<region>.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04` |
+| `HF_MODEL_ID` | `sentence-transformers/all-MiniLM-L6-v2` |
+| `HF_TASK` | `feature-extraction` |
+| Depends On | `aws_iam_role_policy_attachment.sagemaker_full_access` |
 
-### File Terraform chính
+**Quan trọng:** `image` URI phải cùng region với `aws_region`. Nếu khác region, SageMaker báo lỗi: `Cross region ECR image pulls are not allowed`.
 
-#### `main.tf`
+### 3. Endpoint Configuration — `alex-embedding-serverless-config`
 
-Đây là file quan trọng nhất của thư mục.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-embedding-serverless-config` |
+| Model | `alex-embedding-model` |
+| Serverless Memory | **3072 MB** |
+| Max Concurrency | **2** |
 
-File này định nghĩa:
+Memory 3072 MB giúp container có đủ RAM/CPU để khởi động và inference ổn định. Max concurrency đặt thấp để tránh vượt quota tài khoản học viên.
 
-- provider AWS;
-- IAM role cho SageMaker;
-- policy attachment;
-- SageMaker model;
-- endpoint configuration;
-- `time_sleep`;
-- endpoint thực tế.
+### 4. time_sleep — `wait_for_iam_propagation`
 
-Nếu bạn chỉ đọc một file để hiểu thư mục này làm gì, hãy đọc `main.tf`.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Duration | **15 giây** |
+| Depends On | `aws_iam_role_policy_attachment.sagemaker_full_access` |
 
-### File biến đầu vào
+Workaround cho vấn đề IAM propagation. AWS IAM cần vài giây để đồng bộ quyền sau khi tạo/gắn policy. Nếu tạo endpoint quá sớm, SageMaker có thể báo role chưa hợp lệ.
 
-#### `variables.tf`
+### 5. SageMaker Endpoint — `alex-embedding-endpoint`
 
-File này khai báo các input variables mà module cần.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | **`alex-embedding-endpoint`** |
+| Endpoint Config | `alex-embedding-serverless-config` |
+| Depends On | `time_sleep.wait_for_iam_propagation` |
 
-Các biến chính:
+Đây là endpoint thực tế. Sau khi trạng thái là `InService`, bạn có thể dùng AWS CLI hoặc code backend để gửi text và nhận embedding.
 
-- `aws_region`
-- `sagemaker_image_uri`
-- `embedding_model_name`
+---
 
-Ý nghĩa:
+## IAM Roles và Policies — tổng hợp
 
-- `aws_region`: region deploy resource;
-- `sagemaker_image_uri`: URI của Hugging Face inference container trên ECR;
-- `embedding_model_name`: model embedding cụ thể trên Hugging Face Hub.
+| Resource | Name | Policy |
+|----------|------|--------|
+| `aws_iam_role` | `alex-sagemaker-role` | Trust: `sagemaker.amazonaws.com` |
+| `aws_iam_role_policy_attachment` | — | `AmazonSageMakerFullAccess` (managed) |
 
-File này không deploy gì cả.
-Nó chỉ định nghĩa module cần nhận thông tin gì từ bên ngoài.
+---
 
-### File output
+## Environment Variables của SageMaker Model
 
-#### `outputs.tf`
+Đây là biến môi trường được inject vào container inference, không phải biến của Lambda:
 
-File này in ra các giá trị quan trọng sau khi deploy xong.
+| Biến | Giá trị | Mô tả |
+|------|--------|-------|
+| `HF_MODEL_ID` | `sentence-transformers/all-MiniLM-L6-v2` | Model embedding sẽ được tải từ Hugging Face Hub |
+| `HF_TASK` | `feature-extraction` | Loại tác vụ — trả về vector embedding |
 
-Các output chính:
+---
 
-- `sagemaker_endpoint_name`
-- `sagemaker_endpoint_arn`
-- `setup_instructions`
+## Outputs sau khi triển khai
 
-Vai trò của outputs:
+| Output | Giá trị | Mô tả |
+|--------|--------|-------|
+| `sagemaker_endpoint_name` | `alex-embedding-endpoint` | Tên endpoint — copy vào `.env` cho Part 3 |
+| `sagemaker_endpoint_arn` | `arn:aws:sagemaker:<region>:<account>:endpoint/alex-embedding-endpoint` | ARN đầy đủ, dùng khi debug/audit |
+| `setup_instructions` | (text hướng dẫn) | Nhắc các bước tiếp theo sau deploy |
 
-- giúp bạn biết chính xác endpoint tên gì;
-- cho phép copy nhanh vào `.env`;
-- giúp kiểm tra deployment mà không cần mở console.
+---
 
-### File biến mẫu
+## Các biến cần điền trong `terraform.tfvars`
 
-#### `terraform.tfvars.example`
+Copy từ `terraform.tfvars.example` và điền giá trị thực tế:
 
-Đây là file mẫu để bạn copy thành `terraform.tfvars`.
+| Biến | Mô tả | Ví dụ | Default |
+|------|-------|-------|---------|
+| `aws_region` | AWS region để deploy resource | `"ap-southeast-1"` | *(bắt buộc)* |
+| `sagemaker_image_uri` | URI HuggingFace inference container trên ECR | `"763104351884.dkr.ecr.ap-southeast-1.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"` | *(có default theo ap-southeast-1)* |
+| `embedding_model_name` | Tên model trên Hugging Face Hub | `"sentence-transformers/all-MiniLM-L6-v2"` | `"sentence-transformers/all-MiniLM-L6-v2"` |
 
-Mục tiêu:
+### Quy tắc quan trọng
 
-- cho biết các biến nào cần điền;
-- tách cấu hình người dùng ra khỏi logic hạ tầng.
+- `aws_region` là region nào thì `sagemaker_image_uri` cũng phải là ECR image ở đúng region đó.
+- Ví dụ nếu dùng `us-east-1`:
+  ```hcl
+  aws_region          = "us-east-1"
+  sagemaker_image_uri = "763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"
+  ```
 
-Thông thường bạn sẽ làm:
+---
 
-```bash
-cp terraform.tfvars.example terraform.tfvars
+## Version Constraints
+
+| Thành phần | Version |
+|-----------|---------|
+| Terraform CLI | `>= 1.5` |
+| AWS Provider (`hashicorp/aws`) | `~> 5.70` |
+| Backend | Local (`terraform.tfstate` trong thư mục này) |
+
+---
+
+## Quan hệ với các phần khác của project
+
+```
+terraform/2_sagemaker (tạo embedding service)
+       │
+       │  endpoint name: alex-embedding-endpoint
+       ▼
+terraform/3_ingestion (Lambda ingest gọi endpoint này)
+       │
+       │  biến sagemaker_endpoint_name
+       ▼
+backend/ingest (code Python gọi SageMaker để tạo embedding)
 ```
 
-rồi chỉnh:
+- **Guide 3** cần tên endpoint từ thư mục này để điền vào biến `sagemaker_endpoint_name`.
+- **`.env`** root project sẽ cần: `SAGEMAKER_ENDPOINT=alex-embedding-endpoint`
 
-- region;
-- nếu cần thì chỉnh `sagemaker_image_uri`.
+---
 
-### File cấu hình runtime thực tế
+## Model và Container — phân biệt quan trọng
 
-#### `terraform.tfvars`
+| Khái niệm | Giá trị | Vai trò |
+|-----------|--------|---------|
+| `embedding_model_name` | `sentence-transformers/all-MiniLM-L6-v2` | **Model** trên Hugging Face Hub — quyết định chất lượng embedding, số chiều (384) |
+| `sagemaker_image_uri` | ECR HuggingFace container | **Container** — bộ máy chạy model, biết cách tải model từ Hub và chạy inference |
 
-Đây là file cấu hình thật của riêng môi trường bạn.
+---
 
-Ví dụ nó có thể chứa:
+## Cách sử dụng nhanh
 
-```hcl
-aws_region = "ap-southeast-1"
-sagemaker_image_uri = "763104351884.dkr.ecr.ap-southeast-1.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"
-```
-
-Không nên commit file này nếu nó chứa giá trị đặc thù môi trường của bạn.
-
-### File lock provider
-
-#### `.terraform.lock.hcl`
-
-File này do Terraform tạo ra để khóa version provider.
-
-Vai trò:
-
-- giữ môi trường Terraform ổn định;
-- tránh thay đổi provider bất ngờ;
-- giúp các lần `terraform init` sau ít khác biệt hơn.
-
-Thông thường không sửa tay file này.
-
-### File state
-
-#### `terraform.tfstate`
-
-Đây là local state chính của riêng Part 2.
-
-Nhiệm vụ:
-
-- ghi nhớ Terraform đã tạo resource nào;
-- lưu id, arn, và tham chiếu thực tế;
-- cho phép `terraform apply` và `terraform destroy` hoạt động đúng.
-
-Đây là file rất quan trọng nhưng không phải file để chỉnh tay.
-
-#### `terraform.tfstate.backup`
-
-Đây là bản backup của state.
-
-Vai trò:
-
-- hỗ trợ khôi phục nếu state chính bị hỏng hoặc cần tham chiếu lại.
-
-Bạn cũng không nên sửa tay file này.
-
-## Cách các file trong thư mục liên kết với nhau
-
-### Luồng logic nội bộ
-
-1. `variables.tf` định nghĩa module cần đầu vào gì.
-2. `terraform.tfvars` cung cấp giá trị thật cho các biến đó.
-3. `main.tf` dùng các giá trị này để tạo resource AWS.
-4. `outputs.tf` xuất ra các thông tin cần dùng sau deploy.
-5. `.terraform.lock.hcl` giữ version provider ổn định.
-6. `terraform.tfstate` lưu trạng thái thực tế của deployment.
-
-### Quan hệ với các phần khác của project
-
-Thư mục này là nền tảng cho các phần sau, đặc biệt là:
-
-- `backend/ingest`
-- `terraform/3_ingestion`
-
-Cụ thể:
-
-- Guide 3 cần tên endpoint embedding từ thư mục này;
-- Lambda ingest ở Part 3 sẽ gọi endpoint tạo ở đây;
-- `.env` của root project sẽ cần:
-
-```env
-SAGEMAKER_ENDPOINT=alex-embedding-endpoint
-```
-
-Nói cách khác:
-
-- `terraform/2_sagemaker` tạo ra **embedding service**;
-- `backend/ingest` là code gọi embedding service đó;
-- `terraform/3_ingestion` là hạ tầng deploy code ingest thành Lambda/API.
-
-## Giải thích dễ hiểu: model và container khác nhau thế nào?
-
-Đây là chỗ rất nhiều người học hay nhầm.
-
-### `embedding_model_name`
-
-Đây là **model** trên Hugging Face Hub.
-
-Trong project này, giá trị mặc định là:
-
-```text
-sentence-transformers/all-MiniLM-L6-v2
-```
-
-Model này quyết định:
-
-- semantic space;
-- chất lượng embedding;
-- số chiều embedding.
-
-Ở đây model trả về vector **384 chiều**.
-
-### `sagemaker_image_uri`
-
-Đây **không phải model**.
-
-Đây là **container image** trên Amazon ECR.
-
-Container này biết cách:
-
-- nhận request JSON;
-- tải model từ Hugging Face;
-- chạy inference;
-- trả về kết quả.
-
-Hiểu đơn giản:
-
-- `sagemaker_image_uri` là **bộ máy chạy model**;
-- `embedding_model_name` là **model thật được nạp vào bộ máy đó**.
-
-## Luồng hoạt động end-to-end
-
-### Luồng build/deploy
-
-1. Bạn vào `terraform/2_sagemaker`.
-2. Copy file mẫu:
-
-```bash
-cp terraform.tfvars.example terraform.tfvars
-```
-
-3. Điền `aws_region`.
-4. Nếu cần, điền `sagemaker_image_uri` đúng region.
-5. Chạy:
-
-```bash
-terraform init
-terraform apply
-```
-
-6. Terraform tạo IAM role.
-7. Terraform attach policy cho role.
-8. Terraform tạo SageMaker model.
-9. Terraform tạo endpoint configuration.
-10. Terraform chờ IAM propagate qua `time_sleep`.
-11. Terraform tạo endpoint thực tế.
-12. `outputs.tf` in ra tên endpoint và ARN.
-
-### Luồng runtime sau khi deploy
-
-Khi endpoint đã `InService`:
-
-1. Client hoặc backend gửi request JSON tới endpoint.
-2. Container Hugging Face nhận request.
-3. Container tải hoặc dùng model `all-MiniLM-L6-v2`.
-4. Container chạy feature extraction.
-5. SageMaker trả embedding về cho bên gọi.
-
-Ở Guide 2, bên gọi có thể là AWS CLI.
-Ở Guide 3, bên gọi sẽ là Lambda ingest.
-
-## Vì sao chọn SageMaker Serverless?
-
-Project này dùng **SageMaker Serverless Endpoint** thay vì endpoint always-on vì:
-
-- phù hợp môi trường học tập;
-- không cần quản lý instance luôn chạy;
-- chi phí thấp hơn khi ít traffic;
-- đủ tốt cho bài toán embedding của project.
-
-### Lợi ích
-
-- scale-to-zero;
-- trả tiền theo request;
-- dễ triển khai;
-- sát thực tế production hơn việc tự host model thủ công.
-
-### Trade-off
-
-- cold start có thể chậm;
-- thời gian tạo endpoint lâu hơn một số service nhẹ khác;
-- lần invoke đầu tiên thường chậm hơn các lần sau.
-
-## Vì sao lỗi region hay xảy ra ở folder này?
-
-Đây là một trong những lỗi phổ biến nhất ở Part 2.
-
-Lỗi điển hình:
-
-```text
-Cross region ECR image pulls are not allowed
-```
-
-Ý nghĩa:
-
-- SageMaker đang được tạo ở một region;
-- nhưng `sagemaker_image_uri` lại trỏ đến ECR ở region khác.
-
-Ví dụ lỗi:
-
-- `aws_region = "ap-southeast-1"`
-- nhưng image lại là ECR ở `us-east-1`
-
-SageMaker không cho phép kiểu pull image cross-region như vậy trong context này.
-
-### Quy tắc phải nhớ
-
-- `aws_region` là region nào;
-- `sagemaker_image_uri` cũng phải là ECR image ở đúng region đó.
-
-Ví dụ đúng:
-
-```hcl
-aws_region = "ap-southeast-1"
-sagemaker_image_uri = "763104351884.dkr.ecr.ap-southeast-1.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"
-```
-
-## Vì sao cần `time_sleep`?
-
-AWS IAM có độ trễ propagate.
-
-Có những lúc:
-
-1. Terraform vừa tạo role;
-2. Terraform vừa attach policy;
-3. SageMaker lập tức dùng role đó;
-4. AWS trả lỗi rằng role chưa hợp lệ hoặc chưa assume được.
-
-Lỗi này không nhất thiết vì policy sai.
-Nó có thể chỉ vì AWS chưa kịp đồng bộ quyền.
-
-`time_sleep` giúp:
-
-- chờ một khoảng nhỏ;
-- giảm lỗi ngẫu nhiên khi tạo endpoint quá sớm.
-
-## Những điều quan trọng cần nhớ
-
-### 1. Folder này không chứa code model custom
-
-Bạn không tự đóng gói model artifact ở repo này.
-Thay vào đó:
-
-- SageMaker dùng Hugging Face container;
-- container tự tải model từ Hugging Face Hub.
-
-Điều này làm Guide 2 đơn giản hơn rất nhiều.
-
-### 2. Đây là local-state Terraform
-
-State của Part 2 nằm ngay trong thư mục này.
-
-Điều đó có nghĩa:
-
-- đây là state độc lập với Part 3;
-- bạn có thể destroy Part 2 riêng;
-- nếu mất state nhưng resource vẫn còn trên AWS, Terraform có thể "quên" resource.
-
-### 3. Endpoint name là đầu ra quan trọng nhất
-
-Thứ bạn gần như chắc chắn sẽ dùng tiếp là:
-
-- `sagemaker_endpoint_name`
-
-Giá trị này sẽ được copy vào `.env` hoặc vào `terraform/3_ingestion`.
-
-### 4. Endpoint serverless tạo khá lâu là bình thường
-
-SageMaker serverless endpoint không phải resource tạo tức thời.
-
-Bạn nên chờ vài phút thay vì nghĩ Terraform bị treo quá sớm.
-
-## Cách dùng nhanh
-
-### Bước 1: tạo file biến thật
+### Bước 1: Tạo file biến thật
 
 ```bash
 cd terraform/2_sagemaker
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-### Bước 2: chỉnh region
-
-Ví dụ:
+### Bước 2: Chỉnh region trong `terraform.tfvars`
 
 ```hcl
-aws_region = "us-east-1"
+aws_region = "ap-southeast-1"
 ```
 
-Nếu dùng region khác, hãy chắc rằng `sagemaker_image_uri` cũng cùng region.
-
-### Bước 3: khởi tạo Terraform
+### Bước 3: Khởi tạo và deploy
 
 ```bash
 terraform init
-```
-
-### Bước 4: xem plan
-
-```bash
 terraform plan
-```
-
-### Bước 5: deploy
-
-```bash
 terraform apply
 ```
 
-### Bước 6: xem output
+### Bước 4: Xem output
 
 ```bash
 terraform output
 ```
 
-### Bước 7: kiểm tra endpoint
+### Bước 5: Kiểm tra endpoint
 
 ```bash
 aws sagemaker describe-endpoint --endpoint-name alex-embedding-endpoint
 ```
 
-### Bước 8: test invoke
+### Bước 6: Test invoke embedding
 
 ```bash
-cd ../../backend
 aws sagemaker-runtime invoke-endpoint \
   --endpoint-name alex-embedding-endpoint \
   --content-type application/json \
@@ -508,46 +233,52 @@ aws sagemaker-runtime invoke-endpoint \
   --output json /dev/stdout
 ```
 
-## Nếu có lỗi thì nên kiểm tra gì trước?
+---
 
-### Trường hợp 1: lỗi region ECR
+## Các file trong thư mục
 
-Kiểm tra:
+| File | Vai trò |
+|------|--------|
+| `main.tf` | Định nghĩa toàn bộ resource AWS (role, model, endpoint config, endpoint, time_sleep) |
+| `variables.tf` | Khai báo 3 biến đầu vào: `aws_region`, `sagemaker_image_uri`, `embedding_model_name` |
+| `outputs.tf` | Xuất `sagemaker_endpoint_name`, `sagemaker_endpoint_arn`, `setup_instructions` |
+| `terraform.tfvars.example` | File mẫu để copy thành `terraform.tfvars` |
+| `terraform.tfvars` | File cấu hình thật của môi trường bạn *(không commit)* |
+| `.terraform.lock.hcl` | Khóa version provider, do Terraform tự sinh |
+| `terraform.tfstate` | Local state chính — ghi nhớ resource đã tạo *(không sửa tay)* |
+| `terraform.tfstate.backup` | Backup của state |
 
-- `aws_region`
-- `sagemaker_image_uri`
+---
 
-Hai giá trị này phải cùng region.
+## Xử lý lỗi thường gặp
 
-### Trường hợp 2: lỗi role invalid / cannot be assumed
+### Lỗi 1: Cross region ECR image
 
-Kiểm tra:
+**Kiểm tra:** `aws_region` và `sagemaker_image_uri` phải cùng region.
 
-- role đã attach policy chưa;
-- có `time_sleep` hay không;
-- thử apply lại sau một lúc.
+### Lỗi 2: Role invalid / cannot be assumed
 
-### Trường hợp 3: endpoint tạo lâu
+**Kiểm tra:** Role đã attach policy chưa? Có `time_sleep` không? Thử apply lại sau một lúc.
 
-Đây thường là bình thường với serverless endpoint.
+### Lỗi 3: Endpoint tạo lâu
 
-### Trường hợp 4: invoke không thấy endpoint
+Đây là bình thường với serverless endpoint. Có thể mất vài phút.
 
-Thường là do:
+### Lỗi 4: Invoke không thấy endpoint
 
-- AWS CLI đang dùng region mặc định khác với region deploy.
+Thường do AWS CLI đang dùng region mặc định khác với region deploy. Thêm `--region <your-region>` vào lệnh test.
 
-Khi đó, thêm `--region your-region` vào lệnh test.
+---
 
 ## Tóm tắt
 
-Thư mục `terraform/2_sagemaker` là phần **hạ tầng embedding** cho Alex.
+`terraform/2_sagemaker` tạo ra **dịch vụ embedding** nền tảng cho toàn bộ project Alex:
 
-Nó chịu trách nhiệm:
+- **1 IAM Role** (`alex-sagemaker-role`) + **1 Managed Policy** (`AmazonSageMakerFullAccess`)
+- **1 SageMaker Model** (`alex-embedding-model`) chạy container HuggingFace, tự tải `all-MiniLM-L6-v2`
+- **1 Endpoint Configuration** (`alex-embedding-serverless-config`) — serverless, 3072MB, max 2 concurrent
+- **1 Endpoint** (`alex-embedding-endpoint`) — endpoint thực tế, tên này được dùng xuyên suốt Part 3
+- **1 time_sleep** (15s) — workaround IAM propagation
+- **3 Outputs** — endpoint name, ARN, hướng dẫn
 
-- tạo IAM role cho SageMaker;
-- cấu hình model Hugging Face;
-- tạo serverless endpoint;
-- xuất tên endpoint để các phần sau dùng tiếp.
-
-Nếu `terraform/3_ingestion` là phần dựng **Lambda ingest**, thì `terraform/2_sagemaker` là phần dựng **dịch vụ tạo embedding** mà Lambda ingest phụ thuộc trực tiếp.
+Vector đầu ra: **384 chiều**. Model: **sentence-transformers/all-MiniLM-L6-v2**. Chi phí: serverless scale-to-zero, trả tiền theo request.

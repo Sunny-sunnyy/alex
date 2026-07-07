@@ -1,259 +1,455 @@
-# `backend/ingest` - Ingestion Code cho Part 3
+# `backend/ingest` — Mã nguồn Ingestion Pipeline cho Part 3
 
-Thư mục này chứa toàn bộ mã Python phục vụ **Part 3 - Ingestion Pipeline** của dự án Alex.
+Thư mục này chứa toàn bộ mã Python cho **Part 3 - Ingestion Pipeline** của dự án Alex. Đây là phần **application code** — nơi logic nghiệp vụ thực sự chạy. Hạ tầng AWS chạy code này được định nghĩa trong `terraform/3_ingestion`.
 
-Vai trò của thành phần này là:
+---
 
-- nhận văn bản nghiên cứu hoặc tài liệu đầu vào;
-- gọi **SageMaker Endpoint** để tạo **embedding vector**;
-- ghi vector cùng metadata vào **S3 Vectors**;
-- hỗ trợ test local, semantic search, cleanup dữ liệu;
-- đóng gói mã nguồn thành file zip để deploy lên **AWS Lambda**.
+## Nhiệm vụ chính
 
-Nói ngắn gọn: đây là phần **application code** của pipeline ingest.
+Biến văn bản đầu vào thành vector embedding và lưu vào S3 Vectors để phục vụ semantic search / RAG cho toàn bộ hệ thống Alex.
 
-## Mục tiêu của thư mục này
+Cụ thể:
+- Nhận văn bản nghiên cứu hoặc tài liệu đầu vào
+- Gọi **SageMaker Endpoint** (từ Part 2) để tạo **embedding vector 384 chiều**
+- Ghi vector cùng metadata vào **S3 Vectors** index `financial-research`
+- Hỗ trợ test local, semantic search, cleanup dữ liệu
+- Đóng gói mã nguồn thành `lambda_function.zip` để deploy lên **AWS Lambda**
 
-Part 3 của khóa học cần một Lambda function có thể:
+---
 
-1. nhận `text`;
-2. biến `text` thành vector 384 chiều bằng model embedding ở Part 2;
-3. lưu vector đó vào index `financial-research`;
-4. cho phép kiểm tra lại bằng script test/search ở local.
+## Cấu trúc thư mục
 
-Thư mục `backend/ingest` chính là nơi chứa toàn bộ logic đó.
-
-## Các file trong thư mục
-
-### File mã nguồn chính
-
-#### `ingest_s3vectors.py`
-
-Đây là file quan trọng nhất trong thư mục.
-
-Nhiệm vụ:
-
-- đóng vai trò **Lambda handler** chính cho endpoint ingest;
-- đọc payload đầu vào;
-- kiểm tra trường `text`;
-- gọi SageMaker để lấy embedding;
-- tạo `document_id` duy nhất;
-- ghi dữ liệu vào S3 Vectors.
-
-Khi Terraform ở `terraform/3_ingestion` tạo Lambda `alex-ingest`, handler sẽ trỏ vào:
-
-```python
-ingest_s3vectors.lambda_handler
+```
+backend/ingest/
+├── ingest_s3vectors.py       # Lambda handler chính — ingest document
+├── search_s3vectors.py       # Lambda handler — semantic search
+├── package.py                # Build lambda_function.zip
+├── test_ingest_s3vectors.py  # Test local ingest (3 tài liệu mẫu)
+├── test_search_s3vectors.py  # Test local semantic search
+├── cleanup_s3vectors.py      # Xóa toàn bộ vectors trong index
+├── pyproject.toml            # uv project configuration
+├── uv.lock                   # Dependency lock file
+├── .python-version           # Python version hint
+└── lambda_function.zip       # Artifact deploy (generated)
 ```
 
-Đây là file production chính dùng khi client gọi API Gateway `/ingest`.
+---
 
-#### `search_s3vectors.py`
+## Sơ đồ tổng quan
 
-File này chứa Lambda-style handler cho chức năng search vector.
+```mermaid
+graph TB
+    subgraph "Local Development"
+        TEST1[test_ingest_s3vectors.py<br/>Test local ingest]
+        TEST2[test_search_s3vectors.py<br/>Test local search]
+        CLEAN[cleanup_s3vectors.py<br/>Cleanup vectors]
+    end
 
-Nhiệm vụ:
+    subgraph "Source Code"
+        INGEST[ingest_s3vectors.py<br/>Lambda Handler - Ingest]
+        SEARCH[search_s3vectors.py<br/>Lambda Handler - Search]
+    end
 
-- nhận query text;
-- gọi SageMaker để vector hóa query;
-- gọi `query_vectors`;
-- trả về danh sách kết quả gần nhất về ngữ nghĩa.
+    subgraph "Build & Deploy"
+        PKG[package.py<br/>Build ZIP artifact]
+        ZIP[lambda_function.zip<br/>Deployment package]
+    end
 
-Trong Part 3 hiện tại, file này chủ yếu giúp học và tái sử dụng logic search. Nó chưa phải endpoint chính đang public qua Terraform trong thư mục `3_ingestion`, nhưng rất hữu ích để hiểu cách semantic retrieval hoạt động.
+    subgraph "AWS Services"
+        SG[Amazon SageMaker<br/>Embedding Endpoint<br/>384-dim vectors]
+        S3V[Amazon S3 Vectors<br/>index: financial-research]
+        LAMBDA[AWS Lambda<br/>alex-ingest]
+        APIGW[API Gateway<br/>POST /ingest]
+    end
 
-### File test và tiện ích local
+    TEST1 -->|gọi trực tiếp| SG
+    TEST1 -->|ghi trực tiếp| S3V
+    TEST2 -->|query| S3V
+    CLEAN -->|xóa| S3V
 
-#### `test_ingest_s3vectors.py`
+    INGEST --> PKG
+    SEARCH --> PKG
+    PKG --> ZIP
+    ZIP -->|terraform apply| LAMBDA
+    LAMBDA -->|InvokeEndpoint| SG
+    LAMBDA -->|PutVectors| S3V
+    APIGW -->|invoke| LAMBDA
+```
 
-Script test local để kiểm tra ingest trực tiếp bằng SDK.
+---
 
-Nhiệm vụ:
+## Chi tiết từng file
 
-- đọc cấu hình từ `.env`;
-- gọi SageMaker;
-- ghi trực tiếp 3 tài liệu mẫu vào S3 Vectors;
-- xác minh rằng luồng ingest hoạt động mà không cần đi qua API Gateway.
+### 1. `ingest_s3vectors.py` — Lambda Handler Ingest
 
-Đây là cách test rất tốt để tách lỗi:
+**Vai trò:** Đây là file quan trọng nhất trong thư mục — Lambda handler chính cho endpoint ingest.
 
-- nếu script này lỗi, vấn đề thường nằm ở cấu hình local, quyền AWS, SageMaker, hoặc S3 Vectors;
-- nếu script này chạy được nhưng API lỗi, vấn đề thường nằm ở API Gateway hoặc Lambda deploy.
+**Nhiệm vụ chi tiết:**
+- Đóng vai trò entry point `ingest_s3vectors.lambda_handler` cho Lambda `alex-ingest`
+- Đọc payload JSON từ event (hỗ trợ cả body dạng string và object)
+- Kiểm tra trường `text` bắt buộc — thiếu thì trả 400
+- Gọi SageMaker endpoint để sinh embedding 384 chiều
+- Xử lý response từ HuggingFace container (bóc tách cấu trúc `[[[embedding]]]` lồng 3 lớp)
+- Tạo `document_id` duy nhất bằng `uuid.uuid4()`
+- Ghi vector + metadata vào S3 Vectors qua `put_vectors()`
+- Trả về JSON response với `document_id`
 
-#### `test_search_s3vectors.py`
+**Cấu trúc request mong đợi:**
 
-Script test local cho semantic search.
+```json
+{
+    "text": "Văn bản cần vector hóa",
+    "metadata": {
+        "source": "nguồn tùy chọn",
+        "category": "danh mục tùy chọn"
+    }
+}
+```
 
-Nhiệm vụ:
+**Cấu trúc response:**
 
-- đọc bucket/index từ `.env`;
-- tạo embedding cho query;
-- gọi `query_vectors`;
-- in ra các kết quả liên quan;
-- minh họa semantic search bằng các truy vấn mẫu.
+```json
+{
+    "message": "Document indexed successfully",
+    "document_id": "<uuid>"
+}
+```
 
-File này giúp bạn thấy rõ lợi ích của vector search:
+**Biến môi trường sử dụng:**
 
-- truy vấn không cần khớp keyword y hệt;
-- hệ thống vẫn tìm được tài liệu liên quan về mặt ngữ nghĩa.
+| Biến | Mặc định | Mô tả |
+|------|----------|-------|
+| `VECTOR_BUCKET` | `alex-vectors` | Tên bucket S3 Vectors |
+| `SAGEMAKER_ENDPOINT` | *(bắt buộc)* | Tên endpoint embedding |
+| `INDEX_NAME` | `financial-research` | Tên index semantic search |
 
-#### `cleanup_s3vectors.py`
+**Hàm then chốt:**
 
-Script tiện ích để xóa dữ liệu test trong index.
+| Hàm | Chức năng |
+|-----|-----------|
+| `get_embedding(text)` | Gọi SageMaker `invoke_endpoint()`, parse response, trả về list float |
+| `lambda_handler(event, context)` | Entry point Lambda — đọc event, kiểm tra text, sinh embedding, ghi S3 Vectors, trả response |
 
-Nhiệm vụ:
+**Client AWS (module-level, tái sử dụng):**
+- `boto3.client('sagemaker-runtime')` — gọi model embedding
+- `boto3.client('s3vectors')` — ghi/truy vấn vector
 
-- query toàn bộ dữ liệu theo từng batch;
-- xóa từng vector ra khỏi index;
-- đưa knowledge base về trạng thái rỗng để test lại từ đầu.
+---
 
-File này đặc biệt hữu ích khi bạn muốn:
+### 2. `search_s3vectors.py` — Lambda Handler Search
 
-- chạy lại demo nhiều lần;
-- xác minh trước/sau ingest;
-- dọn dữ liệu mẫu để quan sát kết quả rõ hơn.
+**Vai trò:** Lambda handler cho chức năng semantic search.
 
-### File đóng gói và cấu hình môi trường Python
+**Nhiệm vụ chi tiết:**
+- Nhận query text từ event
+- Vector hóa query bằng SageMaker
+- Gọi `query_vectors()` trên S3 Vectors với `topK` và `returnMetadata=True`
+- Format kết quả thành JSON thân thiện (id, score, text, metadata)
 
-#### `package.py`
+**Cấu trúc request mong đợi:**
 
-Đây là script build artifact cho Lambda.
+```json
+{
+    "query": "Câu truy vấn semantic search",
+    "k": 5
+}
+```
 
-Nhiệm vụ:
+**Cấu trúc response:**
 
-- lấy dependencies từ `.venv`;
-- copy source code cần thiết;
-- tạo `lambda_function.zip`.
+```json
+{
+    "results": [
+        {
+            "id": "<vector-key>",
+            "score": 0.85,
+            "text": "Nội dung văn bản gốc...",
+            "metadata": { ... }
+        }
+    ],
+    "count": 3
+}
+```
 
-File zip này sẽ được Terraform dùng để deploy lên Lambda.
+**Lưu ý:** `score` hiện là `distance` gốc từ AWS. File này chưa được public qua Terraform trong Part 3 nhưng rất hữu ích để hiểu semantic retrieval hoạt động thế nào.
 
-Luồng sử dụng chuẩn:
+---
 
+### 3. `package.py` — Build Lambda Deployment Package
+
+**Vai trò:** Script cross-platform (Windows/Mac/Linux) đóng gói source code + dependencies thành file `lambda_function.zip`.
+
+**Quy trình:**
+1. Xóa `build/` và `lambda_function.zip` cũ
+2. Tìm `site-packages` trong `.venv/lib/` (dùng `rglob` để tương thích đa nền tảng)
+3. Copy toàn bộ dependencies vào `build/package/` (bỏ qua `.dist-info`, `__pycache__`, `.pyc`)
+4. Copy `ingest_s3vectors.py` và `search_s3vectors.py` vào package
+5. Nén thành `lambda_function.zip` (thuật toán ZIP_DEFLATED)
+6. Xóa thư mục `build/` tạm
+7. Cảnh báo nếu file > 50MB
+
+**Sử dụng:**
 ```bash
 cd backend/ingest
 uv run package.py
 ```
 
-Sau đó Terraform ở `terraform/3_ingestion` sẽ tham chiếu đến:
-
-```text
-../../backend/ingest/lambda_function.zip
+**Output:** `lambda_function.zip` — file này được `terraform/3_ingestion/main.tf` tham chiếu tại:
+```hcl
+filename = "${path.module}/../../backend/ingest/lambda_function.zip"
 ```
 
-#### `pyproject.toml`
+---
 
-File định nghĩa thư mục này như một **uv project** riêng.
+### 4. `test_ingest_s3vectors.py` — Test Local Ingest
 
-Nhiệm vụ:
+**Vai trò:** Script test local kiểm tra toàn bộ luồng ingest mà không cần qua API Gateway.
 
-- khai báo phiên bản Python;
-- khai báo dependencies;
-- làm nguồn để `uv` cài môi trường local.
+**Cách hoạt động:**
+- Đọc `.env` từ root project (`Path(__file__).parent.parent.parent / '.env'`)
+- Tạo client AWS (`s3vectors`, `sagemaker-runtime`)
+- `get_embedding(text)`: gọi SageMaker lấy embedding
+- `ingest_document(text, metadata)`: sinh embedding → tạo UUID → gọi `put_vectors()`
+- `main()`: nạp 3 tài liệu mẫu về **TSLA**, **AMZN**, **NVDA** kèm ticker/sector/source
 
-#### `uv.lock`
+**Giá trị debug:** Nếu script này chạy được → SageMaker endpoint, IAM permissions, và S3 Vectors cơ bản đều đang hoạt động đúng. Nếu script này OK nhưng API Gateway lỗi → vấn đề nằm ở Lambda deploy hoặc API Gateway.
 
-File lock dependency do `uv` tạo ra.
+---
 
-Nhiệm vụ:
+### 5. `test_search_s3vectors.py` — Test Local Semantic Search
 
-- cố định phiên bản package;
-- giúp môi trường của bạn ổn định hơn giữa các lần cài đặt.
+**Vai trò:** Script explorer minh họa semantic search sau khi dữ liệu đã được ingest.
 
-Thông thường không chỉnh tay file này.
+**Các hàm chính:**
+- `list_all_vectors()`: dùng embedding của từ "company" để query top 10, in danh sách vectors đang có
+- `search_vectors(query_text, k)`: vector hóa query → query S3 Vectors → in similarity score (`1 - distance`)
+- `main()`: liệt kê vectors + chạy 3 truy vấn mẫu:
+  - "electric vehicles and sustainable transportation"
+  - "cloud computing and AWS services"
+  - "artificial intelligence and GPU computing"
 
-#### `.python-version`
+**Minh họa:** Script cho thấy semantic search tìm theo ý nghĩa chứ không chỉ khớp từ khóa chính xác.
 
-File nhỏ dùng để gợi ý phiên bản Python cho môi trường local.
+---
 
-### File generated
+### 6. `cleanup_s3vectors.py` — Xóa Dữ Liệu Test
 
-#### `lambda_function.zip`
+**Vai trò:** Script tiện ích xóa toàn bộ vectors trong index `financial-research`.
 
-Artifact build ra từ `package.py`.
+**Cách hoạt động:**
+1. Yêu cầu người dùng xác nhận `yes/no`
+2. Tạo embedding dummy từ từ "document"
+3. Query S3 Vectors theo batch 30 (`topK` giới hạn)
+4. Xóa từng vector bằng `delete_vectors()`
+5. Lặp đến khi không còn vector
+6. In số lượng đã xóa
 
-Nhiệm vụ:
+**Lưu ý:** Không chạy file này như một phần của benchmark trừ khi người dùng yêu cầu rõ ràng. Cleanup xóa **tất cả** vectors trong index.
 
-- là gói code + dependency để deploy Lambda.
+---
 
-Đây không phải file nên sửa tay.
+### 7. `pyproject.toml` — Cấu hình uv Project
 
-## Cách các file liên kết với nhau
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Python | `>=3.12` |
+| Package manager | `uv` |
 
-### Liên kết nội bộ trong thư mục
+**Dependencies:**
 
-Luồng chính:
+| Package | Version | Mục đích |
+|---------|---------|----------|
+| `boto3` | `>=1.40.1` | SDK AWS — SageMaker, S3 Vectors |
+| `python-dotenv` | `>=1.0.0` | Đọc `.env` cho local test |
+| `tenacity` | `>=9.1.2` | Retry/backoff (tăng độ bền) |
+| `requests` | `>=2.31.0` | HTTP client |
+| `opensearch-py` | `>=3.0.0` | (legacy) |
+| `requests-aws4auth` | `>=1.3.1` | AWS SigV4 signing |
 
-1. `pyproject.toml` định nghĩa môi trường Python.
-2. `uv` cài dependency vào `.venv`.
-3. `package.py` lấy dependency từ `.venv` và tạo `lambda_function.zip`.
-4. `ingest_s3vectors.py` là source code handler chính được đóng gói vào zip.
-5. `terraform/3_ingestion/main.tf` dùng zip đó để tạo Lambda `alex-ingest`.
+---
 
-Luồng test local:
+## Workflow chi tiết
 
-1. `test_ingest_s3vectors.py` đọc `.env`.
-2. Script gọi SageMaker để lấy embedding.
-3. Script ghi dữ liệu vào S3 Vectors.
-4. `test_search_s3vectors.py` truy vấn lại để kiểm tra.
-5. `cleanup_s3vectors.py` dọn dữ liệu khi cần reset.
+### Workflow 1: Production Ingest (qua API Gateway)
 
-### Liên kết với thư mục khác
+```mermaid
+sequenceDiagram
+    participant Client as Client (curl/Researcher)
+    participant APIGW as API Gateway<br/>alex-api / prod
+    participant Lambda as Lambda<br/>alex-ingest
+    participant SM as SageMaker<br/>Embedding Endpoint
+    participant S3V as S3 Vectors<br/>financial-research
 
-Thư mục này phụ thuộc trực tiếp vào:
+    Client->>APIGW: POST /ingest<br/>x-api-key + JSON body
+    APIGW->>APIGW: Kiểm tra API key<br/>+ Usage Plan quota
+    APIGW->>Lambda: Invoke (AWS_PROXY)
+    Lambda->>Lambda: Parse body,<br/>kiểm tra trường text
+    Lambda->>SM: InvokeEndpoint<br/>{"inputs": text}
+    SM-->>Lambda: [[[embedding 384 chiều]]]
+    Lambda->>Lambda: Bóc tách vector 1 chiều,<br/>tạo UUID document_id
+    Lambda->>S3V: PutVectors<br/>key=UUID, data=float32, metadata
+    S3V-->>Lambda: OK
+    Lambda-->>APIGW: 200 {document_id}
+    APIGW-->>Client: 200 {document_id}
+```
 
-- `terraform/2_sagemaker`
-  - vì cần endpoint embedding đã deploy trước đó;
-- `terraform/3_ingestion`
-  - vì thư mục đó dùng `lambda_function.zip` để tạo hạ tầng AWS;
-- `.env` ở root project
-  - vì các script local đọc cấu hình từ đó.
+### Workflow 2: Test Local (bỏ qua API Gateway)
 
-## Luồng hoạt động end-to-end
+```mermaid
+sequenceDiagram
+    participant Script as test_ingest_s3vectors.py
+    participant SM as SageMaker<br/>Embedding Endpoint
+    participant S3V as S3 Vectors<br/>financial-research
 
-### Luồng production qua API Gateway
+    Script->>Script: Đọc .env<br/>(VECTOR_BUCKET, SAGEMAKER_ENDPOINT)
+    loop 3 tài liệu mẫu (TSLA, AMZN, NVDA)
+        Script->>SM: InvokeEndpoint(text)
+        SM-->>Script: embedding 384 chiều
+        Script->>S3V: PutVectors(key=UUID, data, metadata)
+        S3V-->>Script: OK
+    end
+    Script->>Script: In kết quả
+```
 
-1. Client gửi request `POST /ingest` đến API Gateway.
-2. API Gateway kiểm tra `x-api-key`.
-3. API Gateway invoke Lambda `alex-ingest`.
-4. Lambda chạy `ingest_s3vectors.lambda_handler`.
-5. Handler lấy `text` từ payload.
-6. Handler gọi SageMaker endpoint để tạo embedding.
-7. Handler ghi vector vào S3 Vectors cùng metadata.
-8. Lambda trả `document_id` về cho client.
+### Workflow 3: Build & Deploy
 
-### Luồng test local trực tiếp
+```mermaid
+sequenceDiagram
+    participant Dev as Developer
+    participant PKG as package.py
+    participant Venv as .venv/site-packages
+    participant ZIP as lambda_function.zip
+    participant TF as Terraform<br/>3_ingestion
+    participant AWS as AWS Lambda
 
-1. Chạy `uv run test_ingest_s3vectors.py`.
-2. Script đọc `VECTOR_BUCKET` và `SAGEMAKER_ENDPOINT` từ `.env`.
-3. Script nạp 3 tài liệu mẫu.
-4. Chạy `uv run test_search_s3vectors.py`.
-5. Script search truy vấn dữ liệu vừa nạp.
-6. Nếu cần reset, chạy `uv run cleanup_s3vectors.py`.
+    Dev->>PKG: uv run package.py
+    PKG->>Venv: Tìm site-packages
+    PKG->>PKG: Copy dependencies → build/package/
+    PKG->>PKG: Copy ingest_s3vectors.py, search_s3vectors.py
+    PKG->>ZIP: Nén thành lambda_function.zip
+    PKG->>PKG: Xóa build/
+    Dev->>TF: terraform apply
+    TF->>ZIP: Đọc file zip
+    TF->>AWS: Deploy Lambda alex-ingest
+```
 
-## Vì sao thư mục này được tách riêng
+---
 
-Việc tách `backend/ingest` thành một thư mục riêng có lợi vì:
+## Mối liên kết giữa các file trong thư mục
 
-- đây là một đơn vị deploy độc lập;
-- dependency của nó khác với các phần khác của backend;
-- dễ package thành Lambda;
-- dễ test local mà không cần kéo toàn bộ hệ thống lên.
+```mermaid
+graph TB
+    subgraph "Core Handlers"
+        INGEST[ingest_s3vectors.py<br/>Handler chính]
+        SEARCH[search_s3vectors.py<br/>Handler search]
+    end
 
-Đây là một pattern tốt cho serverless project:
+    subgraph "Build"
+        PKG[package.py<br/>Build script]
+        ZIP[lambda_function.zip<br/>Artifact]
+    end
 
-- mỗi thành phần deployable nên có code, dependency, và script build riêng.
+    subgraph "Test & Utility"
+        T1[test_ingest_s3vectors.py<br/>Test local]
+        T2[test_search_s3vectors.py<br/>Explorer]
+        CL[cleanup_s3vectors.py<br/>Cleanup]
+    end
 
-## Cấu hình mà thư mục này cần
+    subgraph "Config"
+        PY[pyproject.toml<br/>uv project]
+        ENV[.env<br/>root project]
+    end
 
-Khi chạy local hoặc deploy, các giá trị quan trọng gồm:
+    INGEST -->|được copy vào| PKG
+    SEARCH -->|được copy vào| PKG
+    PKG -->|tạo ra| ZIP
+    T1 -->|import cùng pattern| INGEST
+    T2 -->|import cùng pattern| SEARCH
+    T1 -.->|đọc cấu hình| ENV
+    T2 -.->|đọc cấu hình| ENV
+    CL -.->|đọc cấu hình| ENV
+    PY -.->|dependencies| PKG
+```
 
-- `VECTOR_BUCKET`
-- `SAGEMAKER_ENDPOINT`
-- `INDEX_NAME` nếu muốn override
+**Giải thích liên kết:**
+- `ingest_s3vectors.py` và `search_s3vectors.py` là 2 handler độc lập — không import lẫn nhau
+- `package.py` đọc `.venv` và copy cả 2 handler vào zip
+- Các script test (`test_*.py`) mô phỏng logic handler nhưng gọi thẳng SDK, không qua Lambda
+- Tất cả script test đều đọc `.env` từ root project
 
-Trong production, Terraform sẽ inject một phần các biến này vào Lambda.
-Trong local, script test đọc chúng từ `.env`.
+---
 
-## Cách dùng nhanh
+## Mối liên hệ với các folder khác
+
+```mermaid
+graph TB
+    subgraph "Part 2"
+        TF2[terraform/2_sagemaker<br/>SageMaker Endpoint]
+    end
+
+    subgraph "Part 3 - Code (thư mục này)"
+        INGEST[backend/ingest<br/>Code + Package]
+    end
+
+    subgraph "Part 3 - Hạ tầng"
+        TF3[terraform/3_ingestion<br/>Lambda + API Gateway]
+    end
+
+    subgraph "Part 4"
+        RESEARCHER[backend/researcher<br/>Researcher Agent]
+        TF4[terraform/4_researcher<br/>Researcher Lambda]
+    end
+
+    subgraph "Root Config"
+        ENV[.env<br/>VECTOR_BUCKET<br/>ALEX_API_ENDPOINT<br/>ALEX_API_KEY]
+    end
+
+    TF2 -->|SAGEMAKER_ENDPOINT| INGEST
+    INGEST -->|lambda_function.zip| TF3
+    TF3 -->|ALEX_API_ENDPOINT<br/>ALEX_API_KEY| ENV
+    ENV -->|cấu hình| RESEARCHER
+    TF4 -->|RESEARCHER_MODEL<br/>Function URL| RESEARCHER
+    RESEARCHER -->|gọi POST /ingest<br/>để lưu kết quả| TF3
+```
+
+### Chi tiết các mối phụ thuộc
+
+**Phụ thuộc vào:**
+| Folder | Cần gì | Dùng ở đâu |
+|--------|--------|------------|
+| `terraform/2_sagemaker` | `SAGEMAKER_ENDPOINT` = `alex-embedding-endpoint` | `ingest_s3vectors.py`, tất cả script test |
+| `.env` (root) | `VECTOR_BUCKET`, `SAGEMAKER_ENDPOINT` | Tất cả script test local |
+
+**Được sử dụng bởi:**
+| Folder | Dùng gì | Mục đích |
+|--------|---------|----------|
+| `terraform/3_ingestion` | `lambda_function.zip` | Deploy Lambda `alex-ingest` |
+| `backend/researcher` | API Gateway endpoint + API key | Gọi `POST /ingest` để lưu kết quả research |
+| `terraform/4_researcher` | `ALEX_API_ENDPOINT`, `ALEX_API_KEY` | Cấu hình researcher Lambda |
+
+---
+
+## Môi trường thực thi
+
+### Local Development
+
+Script test chạy trực tiếp bằng `uv run`, gọi thẳng AWS SDK:
+- Đọc cấu hình từ `.env`
+- Cần AWS credentials đã config (`aws configure`)
+- Không qua API Gateway, không cần API key
+
+### Production (AWS Lambda)
+
+Lambda function `alex-ingest` chạy code từ `lambda_function.zip`:
+- Runtime: **python3.12**
+- Memory: **512 MB**
+- Timeout: **60 giây**
+- Biến môi trường được Terraform inject: `VECTOR_BUCKET`, `SAGEMAKER_ENDPOINT`
+- Gọi qua API Gateway với API key authentication
+
+---
+
+## Cách sử dụng nhanh
 
 ### Cài môi trường
 
@@ -262,19 +458,19 @@ cd backend/ingest
 uv sync
 ```
 
-### Tạo package Lambda
+### Build package Lambda
 
 ```bash
 uv run package.py
 ```
 
-### Test ingest local
+### Test ingest local (3 tài liệu mẫu)
 
 ```bash
 uv run test_ingest_s3vectors.py
 ```
 
-### Test semantic search
+### Khám phá dữ liệu
 
 ```bash
 uv run test_search_s3vectors.py
@@ -286,16 +482,16 @@ uv run test_search_s3vectors.py
 uv run cleanup_s3vectors.py
 ```
 
+---
+
 ## Tóm tắt
 
-Thư mục `backend/ingest` là phần **code thực thi** của Part 3.
+`backend/ingest` là phần **application code** của Part 3. Nó chịu trách nhiệm:
 
-Nó chịu trách nhiệm:
+- **Ingest** văn bản → embedding → S3 Vectors (`ingest_s3vectors.py`)
+- **Search** ngữ nghĩa trên vector database (`search_s3vectors.py`)
+- **Đóng gói** thành Lambda artifact (`package.py` → `lambda_function.zip`)
+- **Test local** để xác minh từng thành phần mà không cần deploy (`test_*.py`)
+- **Cleanup** để reset dữ liệu test (`cleanup_s3vectors.py`)
 
-- ingest dữ liệu;
-- vector hóa dữ liệu bằng SageMaker;
-- lưu dữ liệu vào S3 Vectors;
-- test/search/cleanup ở local;
-- đóng gói thành artifact để deploy Lambda.
-
-Nếu `terraform/3_ingestion` là phần **hạ tầng**, thì `backend/ingest` là phần **logic ứng dụng** mà hạ tầng đó chạy.
+Nếu `terraform/3_ingestion` là phần **hạ tầng AWS**, thì `backend/ingest` là phần **logic ứng dụng** mà hạ tầng đó chạy.

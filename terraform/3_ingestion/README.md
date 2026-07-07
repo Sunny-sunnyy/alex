@@ -1,422 +1,401 @@
-# `terraform/3_ingestion` - Hạ tầng AWS cho Part 3
+# `terraform/3_ingestion` — Hạ tầng AWS cho Part 3 (Ingestion Pipeline)
 
-Thư mục này chứa toàn bộ **Infrastructure as Code** cho **Part 3 - Ingestion Pipeline** của Alex.
+Thư mục này chứa toàn bộ **Infrastructure as Code** cho **Part 3 - Ingestion Pipeline** của dự án Alex.
 
-Vai trò của thư mục này là biến code trong `backend/ingest` thành một dịch vụ AWS có thể dùng thật.
+Vai trò: biến code trong `backend/ingest` thành một dịch vụ AWS hoàn chỉnh — nhận văn bản, gọi SageMaker để tạo embedding, lưu vector vào S3 Vectors, và public endpoint có bảo vệ API key.
 
-Cụ thể, thư mục này triển khai:
+---
 
-- Lambda function `alex-ingest`;
-- IAM role và IAM policy cho Lambda;
-- API Gateway REST API với endpoint `/ingest`;
-- API key và usage plan;
-- các output cần lưu lại vào `.env`.
+## Mục tiêu
 
-Nói ngắn gọn: nếu `backend/ingest` là **application code**, thì `terraform/3_ingestion` là **lớp hạ tầng chạy application code đó trên AWS**.
+Sau Part 2 (SageMaker endpoint), Part 3 cần bổ sung:
 
-## Mục tiêu của thư mục này
+1. Một backend nhận văn bản đầu vào
+2. Một Lambda gọi sang SageMaker để tạo embedding
+3. Một API Gateway public để client gọi được
+4. Cơ chế xác thực bằng API key + Usage Plan
+5. Xuất thông tin cấu hình để dùng cho Part 4
 
-Sau khi hoàn thành Part 2, bạn đã có:
+---
 
-- một **SageMaker Endpoint** để tạo embedding.
+## Sơ đồ tài nguyên AWS được tạo
 
-Part 3 cần bổ sung:
+```
+S3 Bucket (alex-vectors-<account_id>)
+  ├─ Versioning (Enabled)
+  ├─ SSE-S3 AES256 Encryption
+  └─ Public Access Block (4 flags = true)
 
-1. một backend nhận văn bản đầu vào;
-2. một Lambda gọi sang SageMaker;
-3. một API Gateway public để client gọi được;
-4. một cơ chế xác thực đơn giản bằng API key;
-5. một cách xuất thông tin cấu hình ra để dùng tiếp.
+IAM Role (alex-ingest-lambda-role)
+  └─ Inline Policy (alex-ingest-lambda-policy)
+       ├─ CloudWatch Logs
+       ├─ S3 CRUD (bucket + objects)
+       ├─ SageMaker InvokeEndpoint
+       └─ S3 Vectors (Put/Query/Get/Delete)
 
-Thư mục này giải quyết toàn bộ các yêu cầu đó.
+Lambda Function (alex-ingest)
+  │  runtime: python3.12, memory: 512MB, timeout: 60s
+  │  handler: ingest_s3vectors.lambda_handler
+  │  env: VECTOR_BUCKET, SAGEMAKER_ENDPOINT
+  │  code: ../../backend/ingest/lambda_function.zip
+  │
+  ▼
+CloudWatch Log Group (/aws/lambda/alex-ingest)
+  │  retention: 7 days
 
-## Các file trong thư mục
-
-### File Terraform chính
-
-#### `main.tf`
-
-Đây là file quan trọng nhất của thư mục.
-
-Nó định nghĩa toàn bộ resource AWS cho Part 3.
-
-Các nhóm resource chính trong file:
-
-- provider AWS;
-- data source lấy `account_id`;
-- bucket dữ liệu;
-- IAM role/policy cho Lambda;
-- Lambda function `alex-ingest`;
-- CloudWatch log group;
-- REST API Gateway;
-- resource `/ingest`;
-- method `POST`;
-- Lambda proxy integration;
-- permission cho API Gateway invoke Lambda;
-- deployment và stage `prod`;
-- API key;
-- usage plan;
-- usage plan key binding.
-
-Nếu bạn muốn hiểu thư mục này làm gì trên AWS, hãy đọc `main.tf` trước tiên.
-
-### File biến đầu vào
-
-#### `variables.tf`
-
-File này khai báo các input variable mà module cần.
-
-Hiện tại có 2 biến chính:
-
-- `aws_region`
-- `sagemaker_endpoint_name`
-
-Ý nghĩa:
-
-- `aws_region` xác định vùng AWS deploy resource;
-- `sagemaker_endpoint_name` là tên endpoint embedding từ Part 2 mà Lambda sẽ gọi.
-
-File này **không tạo resource**. Nó chỉ định nghĩa module cần nhận thông tin gì từ bên ngoài.
-
-### File output
-
-#### `outputs.tf`
-
-File này xuất các giá trị quan trọng sau khi `terraform apply`.
-
-Các output đáng chú ý:
-
-- `vector_bucket_name`
-- `api_endpoint`
-- `api_key_id`
-- `api_key_value`
-- `setup_instructions`
-
-Vai trò của các output:
-
-- giúp bạn không phải vào console để copy thủ công;
-- cho biết chính xác endpoint và API key cần lưu vào `.env`;
-- giúp test ngay sau deploy.
-
-### File biến mẫu
-
-#### `terraform.tfvars.example`
-
-Đây là file mẫu để bạn copy thành `terraform.tfvars`.
-
-Mục tiêu:
-
-- cho biết những biến nào bạn cần điền;
-- tách cấu hình người dùng ra khỏi logic hạ tầng.
-
-Bạn thường sẽ làm:
-
-```bash
-cp terraform.tfvars.example terraform.tfvars
+API Gateway REST API (alex-api)
+  ├─ Resource: /ingest
+  │    └─ Method: POST (api_key_required = true)
+  │         └─ Integration: AWS_PROXY → Lambda alex-ingest
+  ├─ Deployment (sha1 trigger, create_before_destroy)
+  ├─ Stage: prod
+  ├─ API Key (alex-api-key)
+  └─ Usage Plan (alex-usage-plan)
+       ├─ Quota: 10,000 req/month
+       ├─ Throttle: 100 rate / 200 burst
+       └─ Key Binding: alex-api-key
 ```
 
-rồi chỉnh giá trị thực tế.
+---
 
-### File cấu hình runtime thực tế
+## Chi tiết từng tài nguyên AWS
 
-#### `terraform.tfvars`
+### 1. S3 Bucket — `alex-vectors-<account_id>`
 
-Đây là file bạn tự tạo từ file example.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-vectors-<account_id>` (account_id lấy từ `data.aws_caller_identity`) |
+| Versioning | **Enabled** |
+| Encryption (SSE) | **AES256** (SSE-S3) |
+| Block Public ACLs | **true** |
+| Block Public Policy | **true** |
+| Ignore Public ACLs | **true** |
+| Restrict Public Buckets | **true** |
+| Tags | `Project=alex`, `Part=3` |
 
-Nó chứa giá trị thật cho môi trường của bạn, ví dụ:
+Bucket này lưu dữ liệu vector. Toàn bộ public access bị chặn ở cấp bucket.
 
-- region thật đang dùng;
-- tên endpoint SageMaker thật.
+### 2. IAM Role — `alex-ingest-lambda-role`
 
-Không nên commit file này nếu nó chứa dữ liệu nhạy cảm hoặc giá trị đặc thù môi trường.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-ingest-lambda-role` |
+| Trust Policy | Cho phép `lambda.amazonaws.com` assume role (`sts:AssumeRole`) |
+| Tags | `Project=alex`, `Part=3` |
 
-### File lock provider
+### 3. IAM Inline Policy — `alex-ingest-lambda-policy`
 
-#### `.terraform.lock.hcl`
+Gắn trực tiếp vào role `alex-ingest-lambda-role`. Đây là policy tổng hợp các quyền tối thiểu:
 
-File này do Terraform sinh ra để khóa version provider.
+| Nhóm quyền | Actions | Resource |
+|-----------|---------|----------|
+| CloudWatch Logs | `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` | `arn:aws:logs:<region>:<account>:*` |
+| S3 Bucket | `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` | `alex-vectors-<account_id>` và `alex-vectors-<account_id>/*` |
+| SageMaker | `sagemaker:InvokeEndpoint` | `arn:aws:sagemaker:<region>:<account>:endpoint/<sagemaker_endpoint_name>` |
+| S3 Vectors | `s3vectors:PutVectors`, `s3vectors:QueryVectors`, `s3vectors:GetVectors`, `s3vectors:DeleteVectors` | `arn:aws:s3vectors:<region>:<account>:bucket/alex-vectors-<account_id>/index/*` |
 
-Vai trò:
+### 4. Lambda Function — `alex-ingest`
 
-- giữ môi trường Terraform ổn định;
-- tránh thay đổi provider bất ngờ làm lệch kết quả.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Function Name | **`alex-ingest`** |
+| Runtime | **python3.12** |
+| Handler | `ingest_s3vectors.lambda_handler` |
+| Memory | **512 MB** |
+| Timeout | **60 giây** |
+| IAM Role | `alex-ingest-lambda-role` |
+| Code Source | `../../backend/ingest/lambda_function.zip` |
+| Source Code Hash | `filebase64sha256` của zip (để tự động redeploy khi code đổi) |
+| Tags | `Project=alex`, `Part=3` |
 
-Thông thường không sửa tay.
+**Environment Variables của Lambda:**
 
-### File state
+| Biến | Giá trị | Mô tả |
+|------|--------|-------|
+| `VECTOR_BUCKET` | `alex-vectors-<account_id>` | Tên bucket nơi lưu dữ liệu vector |
+| `SAGEMAKER_ENDPOINT` | Từ biến `var.sagemaker_endpoint_name` | Tên endpoint embedding (từ Part 2) |
 
-#### `terraform.tfstate`
+### 5. CloudWatch Log Group — `/aws/lambda/alex-ingest`
 
-Đây là local state của riêng Part 3.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `/aws/lambda/alex-ingest` |
+| Retention | **7 ngày** |
+| Tags | `Project=alex`, `Part=3` |
 
-Nhiệm vụ:
+### 6. API Gateway REST API — `alex-api`
 
-- ghi nhớ Terraform đã tạo resource nào;
-- lưu id/arn/tham chiếu thực tế;
-- cho phép `terraform apply` và `terraform destroy` làm việc đúng.
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-api` |
+| Description | `Alex Financial Planner API` |
+| Endpoint Type | **REGIONAL** |
+| Tags | `Project=alex`, `Part=3` |
 
-Đây là file rất quan trọng nhưng không phải file để chỉnh tay.
+### 7. API Resource & Method — `POST /ingest`
 
-## Các thành phần AWS mà thư mục này tạo ra
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Path | `/ingest` |
+| HTTP Method | **POST** |
+| Authorization | `NONE` |
+| API Key Required | **true** |
+| Integration Type | `AWS_PROXY` |
+| Integration Target | Lambda `alex-ingest` |
 
-### 1. Bucket dữ liệu
+API Gateway chuyển gần như nguyên bản HTTP request thành event cho Lambda handler xử lý.
 
-File `main.tf` hiện tạo một bucket tên:
+### 8. Lambda Permission cho API Gateway
 
-```text
-alex-vectors-<account_id>
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Statement ID | `AllowAPIGatewayInvoke` |
+| Action | `lambda:InvokeFunction` |
+| Principal | `apigateway.amazonaws.com` |
+| Source ARN | `<api-execution-arn>/*/*` |
+
+### 9. API Deployment
+
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Trigger | `sha1(jsonencode([resource.ingest.id, method.ingest_post.id, integration.lambda.id]))` |
+| Lifecycle | `create_before_destroy = true` |
+
+Terraform tự động tạo deployment mới khi bất kỳ thành phần nào trong trigger thay đổi.
+
+### 10. API Stage — `prod`
+
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Stage Name | **`prod`** |
+| Deployment | Deployment snapshot mới nhất |
+| Tags | `Project=alex`, `Part=3` |
+
+### 11. API Key — `alex-api-key`
+
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-api-key` |
+| Tags | `Project=alex`, `Part=3` |
+
+### 12. Usage Plan — `alex-usage-plan`
+
+| Thuộc tính | Giá trị |
+|-----------|---------|
+| Name | `alex-usage-plan` |
+| Associated Stage | `alex-api` / `prod` |
+| Quota Limit | **10,000** requests |
+| Quota Period | **MONTH** |
+| Throttle Rate | **100** requests/second |
+| Throttle Burst | **200** requests |
+
+Usage Plan gắn với API key `alex-api-key` qua resource `aws_api_gateway_usage_plan_key`.
+
+---
+
+## IAM Roles và Policies — tổng hợp
+
+| Resource | Name | Policy |
+|----------|------|--------|
+| `aws_iam_role` | `alex-ingest-lambda-role` | Trust: `lambda.amazonaws.com` |
+| `aws_iam_role_policy` | `alex-ingest-lambda-policy` | Inline: CloudWatch Logs + S3 CRUD + SageMaker InvokeEndpoint + S3 Vectors CRUD |
+
+---
+
+## Environment Variables của Lambda
+
+| Biến | Nguồn | Mô tả |
+|------|-------|-------|
+| `VECTOR_BUCKET` | `aws_s3_bucket.vectors.id` | Tên bucket lưu vector |
+| `SAGEMAKER_ENDPOINT` | `var.sagemaker_endpoint_name` | Tên endpoint embedding từ Part 2 |
+
+---
+
+## Outputs sau khi triển khai
+
+| Output | Giá trị | Sensitive | Mô tả |
+|--------|--------|-----------|-------|
+| `vector_bucket_name` | `alex-vectors-<account_id>` | No | Tên bucket S3 Vectors |
+| `api_endpoint` | `https://<api-id>.execute-api.<region>.amazonaws.com/prod/ingest` | No | URL endpoint ingest |
+| `api_key_id` | `<key-id>` | No | ID của API key |
+| `api_key_value` | `<key-value>` | **Yes** | Giá trị API key thật |
+| `setup_instructions` | (text hướng dẫn) | No | Hướng dẫn copy vào `.env` và test |
+
+---
+
+## Các biến cần điền trong `terraform.tfvars`
+
+Copy từ `terraform.tfvars.example` và điền giá trị thực tế:
+
+| Biến | Mô tả | Ví dụ | Bắt buộc |
+|------|-------|-------|----------|
+| `aws_region` | AWS region để deploy resource | `"ap-southeast-1"` | Có |
+| `sagemaker_endpoint_name` | Tên endpoint embedding từ Part 2 | `"alex-embedding-endpoint"` | Có |
+
+---
+
+## Version Constraints
+
+| Thành phần | Version |
+|-----------|---------|
+| Terraform CLI | `>= 1.5` |
+| AWS Provider (`hashicorp/aws`) | `~> 5.0` |
+| Backend | Local (`terraform.tfstate` trong thư mục này) |
+
+---
+
+## Quan hệ với các phần khác của project
+
+```
+terraform/2_sagemaker (embedding endpoint)
+       │
+       │  sagemaker_endpoint_name
+       ▼
+backend/ingest (code Python: ingest_s3vectors.py, package.py → lambda_function.zip)
+       │
+       │  lambda_function.zip
+       ▼
+terraform/3_ingestion (thư mục này — hạ tầng AWS)
+       │
+       │  api_endpoint, api_key_value
+       ▼
+terraform/4_researcher (researcher gọi ingest API để lưu kết quả)
+       │
+       │  ALEX_API_ENDPOINT, ALEX_API_KEY
+       ▼
+.env (cấu hình local cho các script test)
 ```
 
-Bucket này được cấu hình thêm:
+### Phụ thuộc vào
 
-- versioning;
-- server-side encryption AES256;
-- block public access.
+- `terraform/2_sagemaker` — cần tên endpoint embedding (`sagemaker_endpoint_name`)
+- `backend/ingest/lambda_function.zip` — phải build trước khi `terraform apply`
 
-### 2. Lambda `alex-ingest`
+### Được dùng bởi
 
-Đây là compute chính của Part 3.
+- `terraform/4_researcher` — cần `api_endpoint` và API key để researcher lưu kết quả
+- `.env` root project — cần `VECTOR_BUCKET`, `ALEX_API_ENDPOINT`, `ALEX_API_KEY`
 
-Lambda này:
-
-- chạy runtime `python3.12`;
-- dùng file zip từ `backend/ingest/lambda_function.zip`;
-- gọi handler `ingest_s3vectors.lambda_handler`;
-- được truyền biến môi trường:
-  - `VECTOR_BUCKET`
-  - `SAGEMAKER_ENDPOINT`
-
-### 3. IAM role và policy
-
-Lambda cần quyền để:
-
-- ghi log vào CloudWatch;
-- thao tác dữ liệu bucket;
-- gọi `sagemaker:InvokeEndpoint`;
-- thao tác `s3vectors:*` cần thiết trên index.
-
-IAM trong Part 3 chính là lớp quyền nối Lambda với các dịch vụ AWS khác.
-
-### 4. API Gateway
-
-API Gateway tạo public endpoint:
-
-```text
-/ingest
-```
-
-Method:
-
-- `POST`
-
-Kiểu integration:
-
-- `AWS_PROXY`
-
-Điều này có nghĩa:
-
-- toàn bộ request gần như được chuyển nguyên sang Lambda;
-- Lambda tự parse `event`.
-
-### 5. API Key và Usage Plan
-
-Đây là lớp bảo vệ quan trọng của endpoint ingest.
-
-API key giúp:
-
-- hạn chế người lạ spam endpoint;
-- giảm nguy cơ phát sinh chi phí AWS vô kiểm soát.
-
-Usage plan giúp:
-
-- đặt quota theo tháng;
-- đặt throttle theo giây;
-- bảo vệ Lambda/SageMaker khỏi quá tải.
-
-## Cách các file trong thư mục liên kết với nhau
-
-### Luồng logic nội bộ
-
-1. `variables.tf` định nghĩa module cần đầu vào gì.
-2. `terraform.tfvars` cung cấp giá trị thật cho đầu vào đó.
-3. `main.tf` dùng các giá trị này để tạo resource AWS.
-4. `outputs.tf` in ra các giá trị cần dùng sau deploy.
-5. `.terraform.lock.hcl` giữ provider ổn định.
-6. `terraform.tfstate` lưu trạng thái thực tế của deployment.
-
-### Quan hệ với `backend/ingest`
-
-Thư mục này phụ thuộc trực tiếp vào `backend/ingest`.
-
-Cụ thể:
-
-- `main.tf` dùng file:
-
-```text
-../../backend/ingest/lambda_function.zip
-```
-
-Điều này có nghĩa:
-
-1. bạn phải chạy `uv run package.py` trong `backend/ingest` trước;
-2. file zip phải tồn tại;
-3. sau đó `terraform apply` mới deploy được Lambda code đúng.
-
-### Quan hệ với `terraform/2_sagemaker`
-
-Part 3 cũng phụ thuộc vào Part 2.
-
-Lý do:
-
-- Lambda ingest phải gọi endpoint embedding đã tạo ở `terraform/2_sagemaker`.
-
-Giá trị kết nối giữa hai part là:
-
-- `sagemaker_endpoint_name`
-
-Thông thường giá trị này là:
-
-```text
-alex-embedding-endpoint
-```
+---
 
 ## Luồng hoạt động end-to-end
 
-### Luồng build và deploy
+### Luồng build & deploy
 
-1. Bạn vào `backend/ingest`.
-2. Chạy:
-
-```bash
-uv run package.py
-```
-
-3. Script tạo `lambda_function.zip`.
-4. Bạn vào `terraform/3_ingestion`.
-5. Copy file:
-
-```bash
-cp terraform.tfvars.example terraform.tfvars
-```
-
-6. Chỉnh region và `sagemaker_endpoint_name`.
-7. Chạy:
-
-```bash
-terraform init
-terraform apply
-```
-
-8. Terraform tạo resource AWS.
-9. `outputs.tf` in ra endpoint và API key info.
+1. Vào `backend/ingest`, chạy `uv run package.py` để tạo `lambda_function.zip`
+2. Vào `terraform/3_ingestion`, copy `terraform.tfvars.example` thành `terraform.tfvars`
+3. Điền `aws_region` và `sagemaker_endpoint_name`
+4. Chạy `terraform init` → `terraform apply`
+5. Copy output vào `.env`
 
 ### Luồng request runtime
 
-Khi hệ thống đang chạy:
+```
+Client (curl/Researcher)
+  │  POST /ingest + x-api-key header
+  ▼
+API Gateway (alex-api / prod)
+  │  kiểm tra API key + usage plan
+  ▼
+Lambda (alex-ingest)
+  │  ingest_s3vectors.lambda_handler
+  │  → gọi SageMaker InvokeEndpoint (tạo embedding)
+  │  → gọi S3 Vectors PutVectors (lưu vector + metadata)
+  │  → trả document_id
+  ▼
+Client nhận response
+```
 
-1. Client gọi API Gateway `POST /ingest`.
-2. API Gateway kiểm tra `x-api-key`.
-3. Nếu hợp lệ, API Gateway invoke Lambda `alex-ingest`.
-4. Lambda chạy code trong `ingest_s3vectors.py`.
-5. Lambda gọi SageMaker endpoint để tạo embedding.
-6. Lambda ghi dữ liệu vector vào S3 Vectors.
-7. Lambda trả `document_id`.
-8. API Gateway trả response về client.
+---
 
-## Vì sao cần tách thư mục này độc lập
+## Cách sử dụng nhanh
 
-Thiết kế của khóa học dùng **mỗi part một thư mục Terraform độc lập**.
-
-Điều này có lợi vì:
-
-- dễ học từng phần;
-- dễ deploy theo từng guide;
-- dễ destroy độc lập;
-- state file nhỏ và đơn giản hơn;
-- ít phụ thuộc chéo hơn trong giai đoạn học tập.
-
-`terraform/3_ingestion` vì thế chỉ quản lý những gì liên quan đến ingest pipeline.
-
-## Những điều quan trọng cần nhớ
-
-### 1. Đây là local-state Terraform
-
-State nằm ngay trong thư mục này, không dùng remote backend.
-
-Điều đó có nghĩa:
-
-- bạn cần giữ file state cẩn thận;
-- nếu mất state nhưng resource vẫn còn trên AWS, Terraform có thể "quên" chúng.
-
-### 2. Thư mục này không tự build code
-
-Terraform chỉ deploy file zip có sẵn.
-
-Nó **không** tự chạy `package.py`.
-
-Bạn phải build zip trước.
-
-### 3. API Gateway và Lambda là hai lớp khác nhau
-
-- API Gateway nhận HTTP request từ bên ngoài;
-- Lambda chạy logic Python bên trong;
-- API Gateway chỉ là lớp cổng vào.
-
-### 4. Usage Plan rất quan trọng
-
-Nếu bỏ API key và usage plan:
-
-- endpoint public có thể bị spam;
-- số lần gọi SageMaker tăng;
-- chi phí tăng rất nhanh.
-
-## Cách dùng nhanh
-
-### Bước 1: build package ở thư mục code
+### Bước 1: Build package
 
 ```bash
 cd backend/ingest
 uv run package.py
 ```
 
-### Bước 2: cấu hình Terraform
+### Bước 2: Cấu hình Terraform
 
 ```bash
 cd ../../terraform/3_ingestion
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-### Bước 3: deploy
+Chỉnh `terraform.tfvars`:
+
+```hcl
+aws_region              = "ap-southeast-1"
+sagemaker_endpoint_name = "alex-embedding-endpoint"
+```
+
+### Bước 3: Deploy
 
 ```bash
 terraform init
 terraform apply
 ```
 
-### Bước 4: lấy output
+### Bước 4: Lấy output và lưu vào `.env`
 
 ```bash
 terraform output
 ```
 
-### Bước 5: lưu vào `.env`
+Copy vào `.env` ở root project:
 
-Thông tin thường cần copy:
+```env
+VECTOR_BUCKET=<vector_bucket_name>
+ALEX_API_ENDPOINT=<api_endpoint>
+ALEX_API_KEY=<api_key_value>
+```
 
-- `VECTOR_BUCKET`
-- `ALEX_API_ENDPOINT`
-- `ALEX_API_KEY`
+### Bước 5: Test endpoint
+
+```bash
+curl -X POST <ALEX_API_ENDPOINT> \
+  -H "x-api-key: <ALEX_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Test document", "metadata": {"source": "test"}}'
+```
+
+---
+
+## Các file trong thư mục
+
+| File | Vai trò |
+|------|--------|
+| `main.tf` | Định nghĩa toàn bộ resource AWS (S3, IAM, Lambda, API Gateway, API key, usage plan) |
+| `variables.tf` | Khai báo 2 biến đầu vào: `aws_region`, `sagemaker_endpoint_name` |
+| `outputs.tf` | Xuất `vector_bucket_name`, `api_endpoint`, `api_key_id`, `api_key_value`, `setup_instructions` |
+| `terraform.tfvars.example` | File mẫu để copy thành `terraform.tfvars` |
+| `terraform.tfvars` | File cấu hình thật của môi trường bạn *(không commit)* |
+| `.terraform.lock.hcl` | Khóa version provider, do Terraform tự sinh |
+| `terraform.tfstate` | Local state chính — ghi nhớ resource đã tạo *(không sửa tay)* |
+
+---
+
+## Những điều quan trọng cần nhớ
+
+1. **Đây là local-state Terraform** — state nằm ngay trong thư mục, không dùng remote backend. Giữ file state cẩn thận.
+2. **Terraform không tự build code** — phải chạy `uv run package.py` trong `backend/ingest` trước khi `terraform apply`.
+3. **API key và Usage Plan rất quan trọng** — nếu bỏ, endpoint public có thể bị spam, chi phí SageMaker/Lambda tăng nhanh.
+4. **API Gateway và Lambda là hai lớp khác nhau** — API Gateway là cổng HTTP, Lambda là compute chạy logic Python.
+
+---
 
 ## Tóm tắt
 
-Thư mục `terraform/3_ingestion` là phần **hạ tầng AWS** cho Part 3.
+`terraform/3_ingestion` tạo ra **hạ tầng ingest pipeline** hoàn chỉnh:
 
-Nó chịu trách nhiệm:
-
-- tạo Lambda ingest;
-- tạo IAM role/policy;
-- tạo API Gateway `/ingest`;
-- tạo API key và usage plan;
-- xuất thông tin để bạn cấu hình local và test tiếp.
-
-Nếu `backend/ingest` là phần **code xử lý**, thì `terraform/3_ingestion` là phần **đưa code đó lên AWS và làm cho nó truy cập được từ bên ngoài**.
+- **1 S3 Bucket** (`alex-vectors-<account_id>`) — versioning, encrypted, private
+- **1 IAM Role** (`alex-ingest-lambda-role`) + **1 Inline Policy** — CloudWatch + S3 + SageMaker + S3 Vectors
+- **1 Lambda Function** (`alex-ingest`) — python3.12, 512MB, 60s
+- **1 CloudWatch Log Group** (`/aws/lambda/alex-ingest`) — retention 7 ngày
+- **1 API Gateway REST API** (`alex-api`) — REGIONAL
+- **1 Endpoint** (`POST /ingest`) — API key required, AWS_PROXY integration
+- **1 API Key** (`alex-api-key`) + **1 Usage Plan** (`alex-usage-plan`) — 10k req/month, 100 rate/200 burst
+- **1 Deployment** + **1 Stage** (`prod`)
+- **5 Outputs** — bucket name, endpoint URL, key ID, key value (sensitive), hướng dẫn

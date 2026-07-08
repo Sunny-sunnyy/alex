@@ -142,9 +142,10 @@ Kết luận:
 
 ## Commit
 
-Commit đã tạo:
+Commits đã tạo:
 
 - `d1b5448 docs: add part 6 tagger and charter readmes`
+- `c9e7960 docs: finalize task 1 report`
 
 ## Concerns
 

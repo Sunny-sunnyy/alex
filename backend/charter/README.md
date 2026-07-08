@@ -2,7 +2,7 @@
 
 ## Nhiệm vụ chính
 
-`backend/charter` chứa Lambda agent sinh dữ liệu biểu đồ cho frontend sau khi portfolio đã có instrument metadata tương đối đầy đủ. Current state của repo là:
+`backend/charter` chứa Lambda agent sinh dữ liệu biểu đồ cho frontend sau khi portfolio đã có instrument metadata tương đối đầy đủ. Trạng thái hiện tại của repo là:
 
 - dùng OpenAI Agents SDK với `LitellmModel(model=f"bedrock/{model_id}")`
 - không dùng tools và không khai báo structured output type
@@ -170,11 +170,11 @@ Env vars current state thường gặp:
 | `BEDROCK_REGION` | `agent.py` gán vào `AWS_REGION_NAME` cho LiteLLM Bedrock. |
 | `AURORA_CLUSTER_ARN` / `AURORA_SECRET_ARN` / `DATABASE_NAME` | package database dùng để đọc portfolio và ghi `charts_payload`. |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | `observability.py`. |
-| `OPENAI_API_KEY` | current state chủ yếu phục vụ tracing/export, không phải luồng model chính. |
+| `OPENAI_API_KEY` | trạng thái hiện tại chủ yếu phục vụ tracing/export, không phải luồng model chính. |
 
 ## Cách chuyển sang OpenAI models
 
-Current state: uses Bedrock model env naming and `AWS_REGION_NAME`
+Trạng thái hiện tại: vẫn dùng cách đặt tên env theo Bedrock và `AWS_REGION_NAME`
 
 Model đề xuất cho agent này: `openai/gpt-5.4-nano`
 
@@ -194,7 +194,7 @@ Các điểm nên đổi khi migrate:
 
 Điểm bắt buộc phải kiểm tra lại sau migrate:
 
-- Re-check JSON output stability after migration because this agent emits chart payloads
+- kiểm tra lại độ ổn định của JSON output sau migration vì agent này phát sinh chart payload
 - model mới có còn tuân thủ yêu cầu "output ONLY valid JSON" không
 - logic bóc JSON substring bằng `{...}` có còn đủ an toàn không
 - số chart sinh ra có còn nằm trong khoảng 4-6 chart như prompt yêu cầu không
@@ -208,4 +208,4 @@ Khuyến nghị thực tế:
 
 ## Tóm tắt
 
-`backend/charter` là agent biến portfolio đã được enrich thành chart payload dùng cho UI. Current state vẫn là Bedrock qua LiteLLM, có parsing JSON thủ công và lưu kết quả vào `jobs.charts_payload`. Khi chuyển sang `openai/gpt-5.4-nano`, phần rủi ro lớn nhất không phải DB hay packaging mà là độ ổn định của JSON output.
+`backend/charter` là agent biến portfolio đã được enrich thành chart payload dùng cho UI. Trạng thái hiện tại vẫn là Bedrock qua LiteLLM, có parsing JSON thủ công và lưu kết quả vào `jobs.charts_payload`. Khi chuyển sang `openai/gpt-5.4-nano`, phần rủi ro lớn nhất không phải DB hay packaging mà là độ ổn định của JSON output.

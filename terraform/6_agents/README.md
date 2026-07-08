@@ -13,7 +13,7 @@ Folder này triển khai lớp hạ tầng AWS cho Part 6 của Alex:
 
 Folder này không build ZIP, không tạo Aurora, không tạo S3 Vectors bucket, không tạo SageMaker endpoint, và không tạo Researcher service. Những phần đó đến từ các part trước.
 
-Current state của repo vẫn Bedrock-centric ở tầng infra:
+Trạng thái hiện tại của repo vẫn Bedrock-centric ở tầng infra:
 
 - Terraform inject `BEDROCK_MODEL_ID` và `BEDROCK_REGION` vào toàn bộ Lambda Part 6
 - model runtime trong code backend hiện vẫn đi theo `LitellmModel(model=f"bedrock/{model_id}")`
@@ -134,7 +134,7 @@ Terraform inject env theo từng Lambda như sau:
 | `LANGFUSE_PUBLIC_KEY` | Yes | Yes | Yes | Yes | Yes | Observability tùy chọn. |
 | `LANGFUSE_SECRET_KEY` | Yes | Yes | Yes | Yes | Yes | Observability tùy chọn. |
 | `LANGFUSE_HOST` | Yes | Yes | Yes | Yes | Yes | Mặc định `https://us.cloud.langfuse.com`. |
-| `OPENAI_API_KEY` | Yes | Yes | Yes | Yes | Yes | Current state chủ yếu để tracing/export cho OpenAI Agents SDK và LangFuse. |
+| `OPENAI_API_KEY` | Yes | Yes | Yes | Yes | Yes | trạng thái hiện tại chủ yếu để tracing/export cho OpenAI Agents SDK và LangFuse. |
 
 Các biến không do Terraform inject nhưng code backend có thể tự fallback:
 
@@ -190,7 +190,7 @@ Vì vậy, khi đọc output sau deploy:
 | `langfuse_public_key` | Optional | comment mẫu | Dùng ở Part 8 nếu bật observability. |
 | `langfuse_secret_key` | Optional | comment mẫu | Sensitive. |
 | `langfuse_host` | Optional | `https://us.cloud.langfuse.com` | Có default. |
-| `openai_api_key` | Optional in Terraform schema, nhưng thực tế nên điền nếu cần tracing | comment mẫu | Current state: tracing/observability cho OpenAI Agents SDK. |
+| `openai_api_key` | Optional in Terraform schema, nhưng thực tế nên điền nếu cần tracing | comment mẫu | trạng thái hiện tại: tracing/observability cho OpenAI Agents SDK. |
 
 Điểm nên kiểm tra trước `terraform apply`:
 
@@ -272,9 +272,9 @@ uv run watch_agents.py --region us-east-1 --lookback 5 --interval 2
 
 ## Cách chuyển sang OpenAI models
 
-Current state phải giữ nguyên khi document:
+Trạng thái hiện tại phải giữ nguyên khi document:
 
-- Terraform injects `BEDROCK_MODEL_ID` and `BEDROCK_REGION` into all Part 6 Lambdas
+- Terraform đang inject `BEDROCK_MODEL_ID` và `BEDROCK_REGION` vào toàn bộ Lambda của Part 6
 - code backend hiện vẫn Bedrock-centric
 - Bedrock IAM policy blocks vẫn tồn tại và đang cần cho runtime hiện tại
 
@@ -315,7 +315,7 @@ Các backend README cần đọc cùng:
 
 ## Tóm tắt
 
-`terraform/6_agents` là lớp hạ tầng tập trung cho Agent Orchestra của Part 6: SQS, IAM, S3 package bucket, 5 Lambda agents, SQS trigger cho planner, và log groups. Current state của folder này vẫn inject `BEDROCK_MODEL_ID` và `BEDROCK_REGION` vào toàn bộ Lambdas, đồng thời truyền `OPENAI_API_KEY` chủ yếu cho tracing/observability.
+`terraform/6_agents` là lớp hạ tầng tập trung cho Agent Orchestra của Part 6: SQS, IAM, S3 package bucket, 5 Lambda agents, SQS trigger cho planner, và log groups. Trạng thái hiện tại của folder này vẫn inject `BEDROCK_MODEL_ID` và `BEDROCK_REGION` vào toàn bộ Lambdas, đồng thời truyền `OPENAI_API_KEY` chủ yếu cho tracing/observability.
 
 Nếu bạn cần đọc theo đúng vai trò:
 

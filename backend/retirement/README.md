@@ -181,7 +181,7 @@ Env vars current state thường gặp:
 
 ## Cách chuyển sang OpenAI models
 
-Current repo still uses Bedrock naming and init path:
+Repo hiện tại vẫn dùng naming và init path theo Bedrock:
 
 - env naming vẫn là `BEDROCK_MODEL_ID` và `BEDROCK_REGION`
 - code khởi tạo `LitellmModel(model=f"bedrock/{model_id}")`
@@ -219,7 +219,7 @@ Các bước migrate ở mức document:
 - analysis markdown có còn hợp lý về retirement reasoning không
 - recommendations có còn nhất quán với Monte Carlo numbers và projection numbers không
 - model mới có bịa thêm assumption trái với dữ liệu Python precompute không
-- Because this agent performs retirement reasoning, validate output quality after migration even though cost/latency is prioritized
+- vì agent này làm retirement reasoning, cần kiểm chứng kỹ chất lượng output sau migration dù cost/latency được ưu tiên
 
 Khuyến nghị thực tế:
 

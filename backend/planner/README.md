@@ -11,7 +11,7 @@
 - chạy OpenAI Agents SDK với 3 tools nội bộ để gọi `reporter`, `charter`, `retirement`
 - cập nhật trạng thái job trong Aurora từ `pending` sang `running`, `completed`, hoặc `failed`
 
-Current state của repo vẫn Bedrock-centric: planner khởi tạo model qua `LitellmModel(model=f"bedrock/{model_id}")` và set `AWS_REGION_NAME` từ `BEDROCK_REGION`.
+Trạng thái hiện tại của repo vẫn Bedrock-centric: planner khởi tạo model qua `LitellmModel(model=f"bedrock/{model_id}")` và set `AWS_REGION_NAME` từ `BEDROCK_REGION`.
 
 ## Cấu trúc thư mục
 
@@ -227,13 +227,13 @@ Env vars current state quan trọng với planner:
 | `DEFAULT_AWS_REGION` | Terraform inject theo `aws_region`; các script test boto3 thường dùng region mặc định của session. |
 | `POLYGON_API_KEY` / `POLYGON_PLAN` | `prices.py` và `market.py` dùng để refresh market prices. |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | `observability.py`. |
-| `OPENAI_API_KEY` | Current state chủ yếu phục vụ tracing/export cho OpenAI Agents SDK và LangFuse, không phải provider model chính của planner. |
+| `OPENAI_API_KEY` | trạng thái hiện tại chủ yếu phục vụ tracing/export cho OpenAI Agents SDK và LangFuse, không phải provider model chính của planner. |
 | `TAGGER_FUNCTION` / `REPORTER_FUNCTION` / `CHARTER_FUNCTION` / `RETIREMENT_FUNCTION` | Tùy chọn override; nếu không set thì planner dùng default `alex-*`. |
 | `MOCK_LAMBDAS` | Chỉ dùng cho local test để mock specialist Lambda calls. |
 
 ## Cách chuyển sang OpenAI models
 
-Current state cần giữ rõ ràng:
+Trạng thái hiện tại cần giữ rõ ràng:
 
 - planner hiện dùng `LitellmModel(model=f"bedrock/{model_id}")`
 - Terraform Part 6 vẫn inject `BEDROCK_MODEL_ID` và `BEDROCK_REGION`
@@ -241,9 +241,9 @@ Current state cần giữ rõ ràng:
 
 Migration guidance cho folder này:
 
-- Suggested model: `openai/gpt-5.4-mini`
-- Planner should remain the strongest model in Part 6 because it owns orchestration decisions
-- Test and log scripts that print Bedrock details should be reviewed when migrating
+- Model đề xuất: `openai/gpt-5.4-mini`
+- Planner nên là model mạnh nhất trong Part 6 vì nó giữ quyết định orchestration
+- Các script test và log đang in chi tiết Bedrock nên cần được rà soát khi migrate
 
 Vì planner ra quyết định gọi agent nào và theo thứ tự nào, đây là folder duy nhất trong nhóm backend Part 6 mà mapping được chốt ở mức `mini` thay vì `nano`.
 
@@ -285,4 +285,4 @@ Checklist test lại sau migration:
 
 ## Tóm tắt
 
-`backend/planner` là canonical backend README của Part 6 vì nó vừa là orchestrator thật của hệ agent, vừa là nơi hợp lý nhất để giải thích các script dùng chung trong `backend/`. Current state của repo vẫn Bedrock-centric, có thêm bước tagging và market-price refresh trước khi vào model orchestration, và dùng SQS `alex-analysis-jobs` làm trigger chuẩn. Nếu migrate sang OpenAI, planner nên được giữ ở `openai/gpt-5.4-mini` để bảo toàn chất lượng quyết định orchestration.
+`backend/planner` là canonical backend README của Part 6 vì nó vừa là orchestrator thật của hệ agent, vừa là nơi hợp lý nhất để giải thích các script dùng chung trong `backend/`. Trạng thái hiện tại của repo vẫn Bedrock-centric, có thêm bước tagging và market-price refresh trước khi vào model orchestration, và dùng SQS `alex-analysis-jobs` làm trigger chuẩn. Nếu migrate sang OpenAI, planner nên được giữ ở `openai/gpt-5.4-mini` để bảo toàn chất lượng quyết định orchestration.

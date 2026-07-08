@@ -124,7 +124,7 @@ Terraform inject env theo từng Lambda như sau:
 | `AURORA_CLUSTER_ARN` | Yes | Yes | Yes | Yes | Yes | Aurora cluster ARN từ Part 5. |
 | `AURORA_SECRET_ARN` | Yes | Yes | Yes | Yes | Yes | Secrets Manager secret ARN từ Part 5. |
 | `DATABASE_NAME` | Yes | Yes | Yes | Yes | Yes | Hardcode là `alex`. |
-| `VECTOR_BUCKET` | Yes | Yes | Yes | Yes | Yes | S3 Vectors bucket name từ Part 3, dùng cho query/search data layer. |
+| `VECTOR_BUCKET` | Yes | No | No | No | No | S3 Vectors bucket name từ Part 3, hiện chỉ Planner nhận env này từ Terraform. |
 | `BEDROCK_MODEL_ID` | Yes | Yes | Yes | Yes | Yes | Model ID hiện tại cho LiteLLM Bedrock. |
 | `BEDROCK_REGION` | Yes | Yes | Yes | Yes | Yes | Region Bedrock hiện tại. |
 | `DEFAULT_AWS_REGION` | Yes | Yes | Yes | Yes | Yes | Region deploy Lambda và boto3 mặc định. |

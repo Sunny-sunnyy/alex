@@ -1,80 +1,67 @@
-# `backend/tagger` — agent gắn nhãn instrument cho Part 6
+# `backend/tagger` — agent phan loai instrument cho Part 6
 
-## Nhiệm vụ chính
+## Nhiem vu chinh
 
-`backend/tagger` chứa Lambda agent chuyên phân loại financial instrument trước khi các agent khác phân tích portfolio. Current state của repo là:
+`backend/tagger` la Lambda agent chuyen phan loai financial instrument truoc khi cac agent khac phan tich portfolio:
 
-- nhận danh sách instrument chưa đủ metadata
-- gọi OpenAI Agents SDK với `LitellmModel(model=f"bedrock/{model_id}")`
-- trả về structured output kiểu Pydantic
-- chuyển kết quả sang `InstrumentCreate`
-- tạo mới hoặc update bảng `instruments` trong Aurora qua shared package `alex-database`
+- nhan danh sach instrument chua du metadata
+- goi OpenAI Agents SDK voi `LitellmModel(model="openai/gpt-5.4-nano")`
+- tra ve structured output kieu Pydantic (`InstrumentClassification`)
+- chuyen ket qua sang `InstrumentCreate`
+- tao moi hoac update bang `instruments` trong Aurora qua shared package `alex-database`
 
-Agent này không dùng tools. Đầu ra chính là allocation theo `asset_class`, `regions`, `sectors` và `current_price`.
+Agent nay **khong dung tools** — chi dung `output_type` de lay structured classification. Dau ra chinh la allocation theo `asset_class`, `regions`, `sectors` va `current_price`.
 
-## Cấu trúc thư mục
+## Cau truc thu muc
 
 ```text
 backend/tagger/
-|-- agent.py
-|-- lambda_handler.py
-|-- observability.py
-|-- package_docker.py
+|-- agent.py              # Core logic: model init, classification, structured output
+|-- lambda_handler.py     # Lambda entry point, DB persistence
+|-- templates.py          # Prompt cho tagger
+|-- observability.py      # LangFuse/logfire tracing wrapper
+|-- package_docker.py     # Build tagger_lambda.zip bang Docker
+|-- compare_models.py     # Script so sanh nhieu model cung 1 instrument
+|-- test_simple.py        # Local smoke test (dung Lambda handler truc tiep)
+|-- test_full.py          # Test Lambda da deploy qua boto3
+|-- track_tagger.py       # Poll CloudWatch logs real-time
+|-- try_tagger.py         # End-to-end: package, deploy, test
+|-- MODEL_COMPARISON.md   # Ket qua benchmark cac model
 |-- pyproject.toml
-|-- templates.py
-|-- test_full.py
-|-- test_simple.py
-|-- track_tagger.py
-|-- try_tagger.py
 `-- uv.lock
 ```
 
-## Sơ đồ tổng quan kiến trúc
+## So do tong quan kien truc
 
 ```mermaid
 flowchart TD
     A[Planner or local caller] --> B[lambda_handler.py]
-    B --> C[tag_instruments]
-    C --> D[classify_instrument]
-    D --> E[OpenAI Agents SDK]
-    E --> F[LitellmModel -> Bedrock]
-    D --> G[InstrumentClassification]
-    B --> H[classification_to_db_format]
-    H --> I[alex-database]
-    I --> J[(Aurora instruments table)]
-    B --> K[observability.py]
+    B --> C[agent.py: classify_instrument]
+    C --> D[OpenAI Agents SDK]
+    D --> E[LitellmModel -> OpenAI]
+    E --> F[Structured Output: InstrumentClassification]
+    B --> G[classification_to_db_format]
+    G --> H[alex-database]
+    H --> I[(Aurora instruments table)]
+    B --> J[observability.py]
 ```
 
-## Chi tiết từng file
+## Chi tiet tung file
 
-| File | Vai trò |
+| File | Vai tro |
 | --- | --- |
-| `agent.py` | Core logic. Khai báo schema `AllocationBreakdown`, `RegionAllocation`, `SectorAllocation`, `InstrumentClassification`; set `AWS_REGION_NAME`; tạo `Agent(..., output_type=InstrumentClassification)`; retry theo `RateLimitError`; map output AI sang `InstrumentCreate`. |
-| `lambda_handler.py` | Entry point của Lambda `alex-tagger`. Nhận `event["instruments"]`, gọi `asyncio.run(process_instruments(...))`, rồi create/update instrument trong DB. |
-| `templates.py` | Prompt nền và prompt task cho classification. Yêu cầu mọi allocation cộng về 100. |
-| `observability.py` | Context manager `observe()` cho LangFuse/logfire. Chỉ setup khi có `LANGFUSE_SECRET_KEY`; cảnh báo nếu thiếu `OPENAI_API_KEY`. |
-| `package_docker.py` | Đóng gói `tagger_lambda.zip` bằng Docker image `public.ecr.aws/lambda/python:3.12`, export dependency từ `uv.lock`, cài local package `../database`, rồi có thể `--deploy` thẳng lên Lambda. |
-| `test_simple.py` | Test local qua `lambda_handler` với 1 instrument mẫu `VTI`. |
-| `test_full.py` | Invoke Lambda `alex-tagger` thật bằng boto3 và kiểm tra dữ liệu đã được ghi vào DB. |
-| `track_tagger.py` | Poll CloudWatch log group `/aws/lambda/alex-tagger` để theo dõi runtime logs theo thời gian thực. |
-| `try_tagger.py` | Script end-to-end: package, upload ZIP lên S3 package bucket, update Lambda code, invoke test, rồi nhắc kiểm tra LangFuse. |
-| `pyproject.toml` | UV project cục bộ; phụ thuộc chính là `openai-agents[litellm]`, `langfuse`, `tenacity`, `alex-database`. |
-| `uv.lock` | Khoá dependency để package và chạy test nhất quán. |
+| `agent.py` | Core logic. Khai bao Pydantic schema (`InstrumentClassification`, `AllocationBreakdown`, `RegionAllocation`, `SectorAllocation`). `MODEL_ID` mac dinh la `openai/gpt-5.4-nano`. `classify_instrument()` nhan optional `model_id` de override. Co `[TIMING]` log cho moi lan classify. Retry voi `RateLimitError`. |
+| `lambda_handler.py` | Entry point Lambda `alex-tagger`. Nhan `event["instruments"]`, goi `process_instruments()`, ghi DB. Response body co `model` va `timing` (classify_s, db_s, lambda_total_s). |
+| `templates.py` | `TAGGER_INSTRUCTIONS` va `CLASSIFICATION_PROMPT`. Yeu cau allocation sum = 100%. |
+| `observability.py` | Context manager `observe()` cho LangFuse/logfire. Chi setup khi co `LANGFUSE_SECRET_KEY`. |
+| `package_docker.py` | Build `tagger_lambda.zip` bang Docker image Lambda Python 3.12, cai `../database`, co option `--deploy`. |
+| `compare_models.py` | Chay `classify_instrument("VTI")` qua nhieu model, ghi ket qua vao `MODEL_COMPARISON.md`. Dung de benchmark model. |
+| `test_simple.py` | Test local: goi `lambda_handler` voi 1 instrument `VTI`. In model, timing, classification. |
+| `test_full.py` | Invoke Lambda `alex-tagger` that bang boto3. Kiem tra DB. In model + timing. |
+| `track_tagger.py` | Poll CloudWatch log group `/aws/lambda/alex-tagger`. Nhan dien `[TIMING]` logs. |
+| `try_tagger.py` | End-to-end: package, upload S3, update Lambda code, invoke test. |
 
-Chi tiết implementation đáng chú ý trong `agent.py`:
-
-- `BEDROCK_MODEL_ID` mặc định là `us.anthropic.claude-3-7-sonnet-20250219-v1:0`.
-- `BEDROCK_REGION` mặc định là `us-west-2`.
-- Structured output được validate hậu kỳ bằng `field_validator`; sai số cộng tổng được nới tới `3`.
-- `tag_instruments()` chạy tuần tự, nghỉ `0.5s` giữa các request để giảm rate limit.
-
-Chi tiết implementation đáng chú ý trong `lambda_handler.py`:
-
-- DB được khởi tạo ở module scope bằng `Database()`.
-- Nếu instrument đã tồn tại, code dùng `db.client.update(...)`; nếu chưa có thì gọi `db.instruments.create_instrument(...)`.
-- HTTP-style response body chứa `tagged`, `updated`, `errors`, `classifications`.
-
-## Workflow chính
+## Workflow chinh
 
 ```mermaid
 sequenceDiagram
@@ -82,44 +69,31 @@ sequenceDiagram
     participant Lambda as lambda_handler
     participant Obs as observe()
     participant AgentFile as agent.py
-    participant Bedrock as Bedrock via LiteLLM
+    participant OpenAI as OpenAI via LiteLLM
     participant DB as alex-database
 
     Caller->>Lambda: { instruments: [...] }
     Lambda->>Obs: enter context
     Lambda->>AgentFile: process_instruments()
     AgentFile->>AgentFile: tag_instruments()
-    loop từng instrument
-        AgentFile->>Bedrock: Runner.run(... output_type=InstrumentClassification)
-        Bedrock-->>AgentFile: structured classification
+    loop tung instrument
+        AgentFile->>OpenAI: Runner.run(... output_type=InstrumentClassification)
+        OpenAI-->>AgentFile: structured classification + [TIMING] log
     end
     AgentFile->>AgentFile: classification_to_db_format()
     AgentFile->>DB: find_by_symbol / update / create_instrument
     DB-->>Lambda: rows / created instrument
-    Lambda-->>Caller: statusCode 200 + JSON summary
+    Lambda-->>Caller: statusCode 200 + model + timing
 ```
 
-Các command thường dùng:
+## Moi lien ket giua cac file
 
-```bash
-cd backend/tagger
-uv run test_simple.py
-uv run test_full.py
-uv run package_docker.py
-uv run package_docker.py --deploy
-uv run track_tagger.py
-uv run try_tagger.py
-```
-
-## Mối liên kết giữa các file
-
-- `lambda_handler.py` phụ thuộc trực tiếp vào `tag_instruments()` và `classification_to_db_format()` từ `agent.py`.
-- `agent.py` phụ thuộc vào `templates.py` để tạo prompt và vào `src.schemas.InstrumentCreate` từ package database.
-- `lambda_handler.py` và mọi test đều phụ thuộc vào shared package `src` của `backend/database`.
-- `observability.py` không can thiệp luồng business; nó chỉ bao quanh handler để export trace nếu LangFuse được cấu hình.
-- `package_docker.py` không đọc Terraform nhưng output ZIP của nó là input cho `terraform/6_agents/main.tf`.
-
-Sơ đồ call/import tối giản:
+- `lambda_handler.py` import `tag_instruments` + `classification_to_db_format` + `MODEL_ID` tu `agent.py`
+- `agent.py` import `TAGGER_INSTRUCTIONS` + `CLASSIFICATION_PROMPT` tu `templates.py`
+- `agent.py` import `InstrumentCreate` tu `src.schemas` (shared package `alex-database`)
+- `lambda_handler.py` dung `Database()` tu shared package de doc/ghi Aurora
+- `observability.py` bao quanh handler, khong anh huong business logic
+- `package_docker.py` output ZIP la input cho `terraform/6_agents/main.tf`
 
 ```mermaid
 graph LR
@@ -130,95 +104,97 @@ graph LR
     AG --> DBS[src.schemas]
     TS[test_simple.py] --> LH
     TF[test_full.py] --> LH
+    CMP[compare_models.py] --> AG
     TRY[try_tagger.py] --> PKG[package_docker.py]
 ```
 
-## Mối liên hệ với folder khác
+## Moi lien he voi folder khac
 
-- `backend/planner`: planner gọi tagger khi portfolio có instrument thiếu classification.
-- `backend/database`: source of truth cho `Database`, `InstrumentCreate`, repository methods và schema Aurora.
-- `terraform/6_agents`: tạo Lambda `alex-tagger`, inject `BEDROCK_MODEL_ID`, `BEDROCK_REGION`, `AURORA_*`, `OPENAI_API_KEY`, `LANGFUSE_*`.
-- `guides/5_database.md`: cung cấp bối cảnh Aurora Data API.
-- `guides/6_agents.md`: giải thích vai trò Tagger trong agent orchestra, nhưng nếu guide và code lệch nhau thì code hiện tại là source of truth.
+- `backend/planner`: planner goi tagger khi portfolio co instrument thieu classification
+- `backend/database`: source of truth cho `Database`, `InstrumentCreate`, Aurora schema
+- `backend/reporter`, `backend/charter`, `backend/retirement`: chat luong output phu thuoc vao allocation metadata tu tagger
+- `terraform/6_agents`: tao Lambda `alex-tagger`, inject `MODEL_ID`, `AURORA_*`, `OPENAI_API_KEY`, `LANGFUSE_*`
 
-## Cách sử dụng nhanh
-
-Điều kiện tối thiểu:
-
-- đang đứng trong repo Alex và đã có `.env`
-- DB Part 5 và Lambda Part 6 đã sẵn sàng nếu muốn chạy full test
-- Docker Desktop đang chạy nếu cần package
-
-Chạy local test:
+## Cach su dung nhanh
 
 ```bash
 cd backend/tagger
+
+# Test local (mac dinh openai/gpt-5.4-nano)
 uv run test_simple.py
-```
 
-Chạy Lambda thật:
+# Test voi model khac
+MODEL_ID=openai/gpt-4.1-nano uv run test_simple.py
 
-```bash
-cd backend/tagger
+# Test Lambda da deploy
 uv run test_full.py
-```
 
-Package/deploy:
+# So sanh nhieu model
+uv run compare_models.py
+uv run compare_models.py --model openai/gpt-5-nano
 
-```bash
-cd backend/tagger
+# Package va deploy
 uv run package_docker.py
 uv run package_docker.py --deploy
+
+# Theo doi log CloudWatch
+uv run track_tagger.py
 ```
 
-Env vars current state thường gặp:
+## Environment variables
 
-| Biến | Dùng ở đâu |
-| --- | --- |
-| `BEDROCK_MODEL_ID` | `agent.py` chọn model Bedrock cho LiteLLM. |
-| `BEDROCK_REGION` | `agent.py` gán vào `AWS_REGION_NAME`. |
-| `AURORA_CLUSTER_ARN` | package database dùng để nói chuyện với Data API. |
-| `AURORA_SECRET_ARN` | package database lấy credential cho Data API. |
-| `DATABASE_NAME` | hiện là `alex`. |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | `observability.py`. |
-| `OPENAI_API_KEY` | current state chủ yếu phục vụ tracing/export, không phải luồng model chính. |
+| Bien | Dung o dau | Mac dinh |
+| --- | --- | --- |
+| `MODEL_ID` | `agent.py` — model string cho `LitellmModel` | `openai/gpt-5.4-nano` |
+| `OPENAI_API_KEY` | LiteLLM — credential cho OpenAI API | bat buoc |
+| `AURORA_CLUSTER_ARN` | shared database package — Data API endpoint | bat buoc |
+| `AURORA_SECRET_ARN` | shared database package — credential | bat buoc |
+| `DATABASE_NAME` | shared database package | `alex` |
+| `DEFAULT_AWS_REGION` | boto3 clients (DB, Lambda invoke) | `us-east-1` |
+| `LANGFUSE_PUBLIC_KEY` | `observability.py` | optional |
+| `LANGFUSE_SECRET_KEY` | `observability.py` | optional |
+| `LANGFUSE_HOST` | `observability.py` | `https://us.cloud.langfuse.com` |
+| `MOCK_LAMBDAS` | chi dung cho local test cua planner goi tagger | optional |
 
-## Cách chuyển sang OpenAI models
+## Log output
 
-Current state: `LitellmModel(model=f"bedrock/{model_id}")`
+Moi lan classify deu in `[TIMING]` log kem model name de so sanh giua cac model:
 
-Model đề xuất cho agent này: `openai/gpt-5.4-nano`
+```
+[TIMING] classify_instrument(VTI): 3.60s | model=openai/gpt-5.4-nano
+[TIMING] tag_instruments: 1/1 classified in 3.60s | avg=3.60s per instrument | model=openai/gpt-5.4-nano
+[TIMING] Classification phase: 3.60s
+[TIMING] process_instruments total: 4.16s (classify=3.60s, db=0.56s) | model=openai/gpt-5.4-nano
+[TIMING] lambda_handler TOTAL: 4.16s | instruments=1 | model=openai/gpt-5.4-nano
+```
 
-Mục tiêu migrate của `tagger` là giữ structured classification ổn định, nhưng bỏ phụ thuộc Bedrock trong runtime model call. Các file cần rà soát khi migrate:
+Response body cung chua `model` va `timing` breakdown:
 
-- `backend/tagger/agent.py`
-- `terraform/6_agents/main.tf`
-- `terraform/6_agents/variables.tf`
-- `terraform/6_agents/terraform.tfvars.example`
+```json
+{
+  "tagged": 1,
+  "updated": ["VTI"],
+  "model": "openai/gpt-5.4-nano",
+  "timing": {
+    "classify_s": 3.60,
+    "db_s": 0.56,
+    "lambda_total_s": 4.16
+  }
+}
+```
 
-Cách đổi ở mức code:
+## Model da test
 
-1. Trong `backend/tagger/agent.py`, thay phần tạo model từ:
-   - `LitellmModel(model=f"bedrock/{model_id}")`
-   - sang model string/provider tương ứng cho OpenAI, ví dụ `LitellmModel(model="openai/gpt-5.4-nano")`
-2. Bỏ logic chỉ dành cho Bedrock nếu không còn cần:
-   - `BEDROCK_REGION`
-   - `os.environ["AWS_REGION_NAME"] = bedrock_region`
-3. Giữ nguyên `output_type=InstrumentClassification` và chạy lại validation vì đây là phần quan trọng nhất của agent.
+Ket qua benchmark voi VTI (Vanguard Total Stock Market ETF):
 
-Cách đổi ở mức Terraform/env:
+| Model | Classify (s) | Total (s) | Danh gia |
+| --- | --- | --- | --- |
+| `openai/gpt-5.4-nano` | 3.60 | 4.16 | Nhanh, on dinh — **khuyen nghi** |
+| `openai/gpt-4.1-nano` | 3.53 | 3.84 | Nhanh nhat, nhe nhat |
+| `openai/gpt-5-nano` | 46.84 | 47.99 | Qua cham, khong kha dung |
 
-- Repo hiện vẫn inject biến kiểu Bedrock như `BEDROCK_MODEL_ID` và `BEDROCK_REGION`.
-- Có thể giảm churn bằng cách giữ tên biến cũ nhưng đổi giá trị sang provider mới trong giai đoạn đầu của migration.
-- Sau khi đổi provider thật, narrative trong docs nên nói rõ `OPENAI_API_KEY` không còn chỉ phục vụ observability mà còn là credential cho model calls.
-- Khi đã chuyển hẳn sang OpenAI, IAM policy Bedrock trong `terraform/6_agents/main.tf` có thể được gỡ hoặc giữ tạm trong giai đoạn chuyển tiếp.
+Xem chi tiet trong [`MODEL_COMPARISON.md`](./MODEL_COMPARISON.md).
 
-Điểm cần test lại sau migrate:
+## Tom tat
 
-- model có còn trả structured output đúng schema không
-- validator tổng 100% có làm agent fail nhiều hơn không
-- retry với `RateLimitError` của litellm có còn phù hợp với provider mới không
-
-## Tóm tắt
-
-`backend/tagger` là agent phân loại instrument gọn nhất trong Part 6, nhưng nó là tiền đề cho chất lượng của planner, reporter, charter và retirement. Current state của repo là Bedrock-centric qua LiteLLM; README này mô tả đúng trạng thái đó và chỉ thêm hướng dẫn riêng để chuyển sang `openai/gpt-5.4-nano` khi bạn sẵn sàng migrate thật.
+`backend/tagger` la agent phan loai instrument gon nhat trong Part 6, nhung la tien de cho chat luong cua planner, reporter, charter va retirement. Da migrate tu Bedrock sang `openai/gpt-5.4-nano`. Moi log deu co `[TIMING]` + model name de de dang so sanh khi doi model. Su dung `MODEL_ID` env var de chuyen model, hoac `classify_instrument(model_id=...)` de override trong code.

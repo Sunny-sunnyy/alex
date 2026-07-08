@@ -180,6 +180,16 @@ erDiagram
     }
 ```
 
+**Bảng diễn giải ER overview bằng tiếng Việt**
+
+| Bảng | Vai trò chính | Quan hệ chính |
+|---|---|---|
+| `users` | Lưu hồ sơ tối thiểu của người dùng ngoài hệ thống Clerk | 1 user có nhiều `accounts` và nhiều `jobs` |
+| `instruments` | Lưu dữ liệu tham chiếu chung cho ETF, cổ phiếu, quỹ và trái phiếu | 1 `instrument` có thể được nhiều `positions` tham chiếu |
+| `accounts` | Lưu các tài khoản đầu tư của từng người dùng như 401k, Roth IRA, Taxable | mỗi `account` thuộc 1 `user` và có nhiều `positions` |
+| `positions` | Lưu các khoản nắm giữ thực tế trong từng tài khoản | mỗi `position` thuộc 1 `account` và tham chiếu 1 `instrument` |
+| `jobs` | Lưu trạng thái và kết quả của các tác vụ phân tích bất đồng bộ | mỗi `job` thuộc 1 `user`; các agent ghi kết quả vào các cột payload riêng |
+
 ### 6.2 Bảng `users`
 
 **Mục đích:** lưu user profile tối thiểu cho ứng dụng. Auth thật do Clerk giữ; bảng này chỉ giữ các trường phục vụ financial planning.

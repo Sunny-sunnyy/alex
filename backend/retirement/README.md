@@ -2,15 +2,17 @@
 
 ## Nhiệm vụ chính
 
-`backend/retirement` là specialist agent dùng dữ liệu portfolio hiện tại cộng với giả định retirement để sinh phân tích dài hạn và lưu vào `jobs.retirement_payload`. Source of truth của README này là current state trong code:
+`backend/retirement` là specialist agent dùng dữ liệu portfolio hiện tại cộng với giả định retirement để sinh phân tích dài hạn và lưu vào `jobs.retirement_payload`:
 
-- vẫn khởi tạo model qua `LitellmModel(model=f"bedrock/{model_id}")`
+- dùng OpenAI Agents SDK với `LitellmModel(model=MODEL_ID)` — đã migrate từ Bedrock sang OpenAI
+- env var: `MODEL_ID_RETIREMENT` (default `openai/gpt-5.4-nano`)
 - không dùng tools và không truyền typed context vào agent runtime
 - phần tính toán định lượng chạy trước trong Python: portfolio value, asset allocation, Monte Carlo, milestone projections
 - agent chỉ dùng kết quả đã tính sẵn để viết markdown analysis
 - persistence diễn ra trong `lambda_handler.py` qua `db.jobs.update_retirement(...)`
+- có `[TIMING]` log đầy đủ: create, agent, db, lambda_total
 
-Folder này là nơi reasoning domain-specific mạnh nhất trong các specialist agent, nhưng current state vẫn ưu tiên flow đơn giản và dễ deploy.
+Folder này là nơi reasoning domain-specific mạnh nhất trong các specialist agent.
 
 ## Cấu trúc thư mục
 
@@ -40,7 +42,7 @@ flowchart TD
     E --> H[run_monte_carlo_simulation]
     E --> I[generate_projections]
     E --> J[Retirement Agent]
-    J --> K[LitellmModel -> Bedrock]
+    J --> K[LitellmModel -> OpenAI]
     B --> L[db.jobs.update_retirement]
     B --> M[observability.py]
     L --> N[(Aurora jobs.retirement_payload)]
@@ -50,20 +52,19 @@ flowchart TD
 
 | File | Vai trò |
 | --- | --- |
-| `agent.py` | Chứa toàn bộ logic định lượng trước khi gọi LLM: tính portfolio value, allocation, Monte Carlo 500 scenario, projections theo milestone, set `AWS_REGION_NAME`, rồi build task markdown cho agent. |
-| `lambda_handler.py` | Entry point của Lambda `alex-retirement`. Tự load portfolio từ DB nếu thiếu, load user preferences, retry khi rate limit/timeout/lỗi tạm thời, chạy agent và lưu `retirement_payload`. |
+| `agent.py` | Chứa toàn bộ logic định lượng trước khi gọi LLM: tính portfolio value, allocation, Monte Carlo 500 scenario, projections theo milestone. Khởi tạo `LitellmModel(model=MODEL_ID)` với `MODEL_ID_RETIREMENT` từ env. Build task markdown cho agent. Có `[TIMING]` log. |
+| `lambda_handler.py` | Entry point của Lambda `alex-retirement`. Tự load portfolio từ DB nếu thiếu, load user preferences, retry khi rate limit/timeout/lỗi tạm thời, chạy agent và lưu `retirement_payload`. Có `[TIMING]` log đầy đủ qua các phase: create, agent, db, lambda_total. Response body chứa `model` + `timing` breakdown. |
 | `templates.py` | Chứa `RETIREMENT_INSTRUCTIONS` cho analysis và `RETIREMENT_ANALYSIS_TEMPLATE` cũ để tham khảo; current state thực tế dùng instructions + task do `agent.py` build. |
-| `observability.py` | Context manager để setup Logfire + LangFuse và flush traces ở cuối runtime nếu env có cấu hình. |
+| `observability.py` | Context manager để setup Logfire + LangFuse và flush traces ở cuối runtime nếu env có cấu hình. Log sạch, không emoji. |
 | `package_docker.py` | Build `retirement_lambda.zip` bằng Docker Lambda Python 3.12 image, cài dependencies từ `uv.lock` + package database, rồi có thể `--deploy` lên `alex-retirement`. |
-| `test_simple.py` | Tạo job test trong DB, gọi `lambda_handler()` local với portfolio mẫu, đọc `retirement_payload`, kiểm tra reasoning artifacts và xóa job. |
-| `test_full.py` | Invoke Lambda `alex-retirement` thật bằng boto3 với `job_id`, rồi kiểm tra `retirement_payload` trong DB. |
-| `pyproject.toml` | UV project cục bộ, dependency gần giống `reporter`: `openai-agents[litellm]`, `boto3`, `langfuse`, `tenacity`, `alex-database`. |
+| `test_simple.py` | Tạo job test trong DB, gọi `lambda_handler()` local với portfolio mẫu, in model + timing, đọc `retirement_payload`, và xóa job. |
+| `test_full.py` | Invoke Lambda `alex-retirement` thật bằng boto3 với `job_id`, in model + timing, rồi kiểm tra `retirement_payload` trong DB. |
+| `pyproject.toml` | UV project cục bộ, dependency: `openai-agents[litellm]`, `boto3`, `langfuse`, `tenacity`, `alex-database`. |
 | `uv.lock` | File lock để local run và Docker package nhất quán. |
 
-Các điểm implementation đáng chú ý trong current state:
+Các điểm implementation đáng chú ý:
 
-- `BEDROCK_MODEL_ID` default là `us.anthropic.claude-3-7-sonnet-20250219-v1:0`.
-- `BEDROCK_REGION` default là `us-west-2`.
+- `MODEL_ID_RETIREMENT` default là `openai/gpt-5.4-nano`.
 - Monte Carlo dùng `500` simulations, không phải `1000` như text trong `RETIREMENT_ANALYSIS_TEMPLATE`.
 - Annual contribution đang hardcode `10000` mỗi năm trong accumulation phase.
 - Retirement phase giả định 30 năm, inflation 3%, cash return 2%.
@@ -94,28 +95,20 @@ sequenceDiagram
     AgentFile->>Calc: run_monte_carlo_simulation(500)
     AgentFile->>Calc: generate_projections()
     Calc-->>AgentFile: precomputed metrics
-    AgentFile-->>Lambda: model, tools=[], task
+    AgentFile-->>Lambda: model, tools=[], task, MODEL_ID
     Lambda->>Retirement: Runner.run(..., max_turns=20)
     Retirement-->>Lambda: markdown analysis
     Lambda->>DB: update_retirement(job_id, payload)
     DB-->>Lambda: success/failure
-    Lambda-->>Caller: statusCode + summary
+    Lambda-->>Caller: statusCode 200 + model + timing
 ```
-
-Luồng dữ liệu quan trọng:
-
-- input bắt buộc là `job_id`
-- `portfolio_data` là optional; nếu thiếu thì handler reconstruct từ DB
-- `user_preferences` không đi từ event mà được đọc từ DB qua `get_user_preferences()`
-- output cuối lưu vào `jobs.retirement_payload` với các key `analysis`, `generated_at`, `agent`
 
 ## Mối liên kết giữa các file
 
 - `lambda_handler.py` chịu trách nhiệm retry, load data, gọi agent, và persistence.
 - `agent.py` là source of truth cho toàn bộ financial math của folder này; prompt chỉ là lớp diễn giải kết quả.
 - `templates.py` không trực tiếp tạo task runtime ngoài `RETIREMENT_INSTRUCTIONS`.
-- `observability.py` bọc toàn bộ handler, nhưng current state không trả về client object cho caller sử dụng.
-- `package_docker.py` tạo artifact cho Terraform/Lambda deployment.
+- `observability.py` bọc toàn bộ handler.
 
 Sơ đồ import/call tối giản:
 
@@ -137,96 +130,70 @@ graph LR
 - `backend/tagger`: metadata allocation của instrument ảnh hưởng trực tiếp tới `calculate_asset_allocation()`.
 - `backend/reporter`: cùng đọc portfolio data tương tự, nhưng retirement bổ sung simulation/projection thay vì market tool flow.
 - `terraform/5_database`: cung cấp Aurora/Data API cho load và save payload.
-- `terraform/6_agents`: deploy Lambda `alex-retirement`, inject env vars model/DB/observability.
+- `terraform/6_agents`: deploy Lambda `alex-retirement`, inject `MODEL_ID_RETIREMENT`, DB, observability env vars.
 
 ## Cách sử dụng nhanh
 
-Điều kiện tối thiểu:
-
-- có `.env` hoặc env vars cho DB và model
-- DB Part 5 sẵn sàng nếu muốn test flow đọc/ghi thật
-- Docker Desktop đang chạy nếu cần package
-
-Chạy test local:
-
 ```bash
 cd backend/retirement
+
+# Test local (dùng MODEL_ID_RETIREMENT từ env, default openai/gpt-5.4-nano)
 uv run test_simple.py
-```
 
-Chạy test Lambda thật:
+# Test với model khác
+MODEL_ID_RETIREMENT=openai/gpt-4.1-nano uv run test_simple.py
 
-```bash
-cd backend/retirement
+# Test Lambda đã deploy
 uv run test_full.py
-```
 
-Package hoặc deploy nhanh:
-
-```bash
-cd backend/retirement
+# Package và deploy
 uv run package_docker.py
 uv run package_docker.py --deploy
 ```
 
-Env vars current state thường gặp:
+## Environment variables
 
-| Biến | Dùng ở đâu |
-| --- | --- |
-| `BEDROCK_MODEL_ID` | `agent.py` dùng để khởi tạo model qua LiteLLM. |
-| `BEDROCK_REGION` | `agent.py` set `AWS_REGION_NAME` cho LiteLLM Bedrock. |
-| `AURORA_CLUSTER_ARN` / `AURORA_SECRET_ARN` / `DATABASE_NAME` | shared database package dùng để tải user/job/account/position/instrument và lưu retirement payload. |
-| `LANGFUSE_SECRET_KEY` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_HOST` | `observability.py`. |
-| `OPENAI_API_KEY` | current state chủ yếu phục vụ observability/LangFuse export, không phải luồng model chính. |
+| Biến | Dùng ở đâu | Mặc định |
+| --- | --- | --- |
+| `MODEL_ID_RETIREMENT` | `agent.py` — model string cho `LitellmModel` | `openai/gpt-5.4-nano` |
+| `OPENAI_API_KEY` | LiteLLM — credential cho OpenAI API | bắt buộc |
+| `AURORA_CLUSTER_ARN` | shared database package — Data API endpoint | bắt buộc |
+| `AURORA_SECRET_ARN` | shared database package — credential | bắt buộc |
+| `DATABASE_NAME` | shared database package | `alex` |
+| `DEFAULT_AWS_REGION` | boto3 clients (DB, Lambda invoke) | `us-east-1` |
+| `LANGFUSE_PUBLIC_KEY` | `observability.py` | optional |
+| `LANGFUSE_SECRET_KEY` | `observability.py` | optional |
+| `LANGFUSE_HOST` | `observability.py` | `https://us.cloud.langfuse.com` |
 
-## Cách chuyển sang OpenAI models
+## Log output
 
-Repo hiện tại vẫn dùng naming và init path theo Bedrock:
+Mỗi lần chạy đều in `[TIMING]` log kèm model name:
 
-- env naming vẫn là `BEDROCK_MODEL_ID` và `BEDROCK_REGION`
-- code khởi tạo `LitellmModel(model=f"bedrock/{model_id}")`
-- logic `AWS_REGION_NAME` hiện tồn tại chỉ để hỗ trợ Bedrock qua LiteLLM
+```
+[TIMING] create_agent: 0.48s | model=openai/gpt-5.4-nano
+[TIMING] Agent creation phase: 0.48s
+[TIMING] Agent run phase: 18.96s | model=openai/gpt-5.4-nano
+[TIMING] run_retirement_agent TOTAL: 20.01s (create=0.48s, agent=18.96s, db=0.55s) | model=openai/gpt-5.4-nano
+[TIMING] lambda_handler TOTAL: 20.01s | job=... | model=openai/gpt-5.4-nano
+```
 
-Model đề xuất cho folder này: `openai/gpt-5.4-nano`
+Response body cũng chứa `model` và `timing` breakdown:
 
-Lý do:
-
-- user ưu tiên tốc độ và chi phí cho đợt migrate tài liệu này
-- phần tính toán nặng đã nằm trong Python, nên LLM chủ yếu diễn giải kết quả
-- dù vậy đây vẫn là agent làm retirement reasoning, nên cần kiểm chứng chất lượng output kỹ sau migration
-
-Các file cần rà soát khi migrate thật:
-
-- `backend/retirement/agent.py`
-- `backend/retirement/lambda_handler.py`
-- `terraform/6_agents/main.tf`
-- `terraform/6_agents/variables.tf`
-- `terraform/6_agents/terraform.tfvars.example`
-
-Các bước migrate ở mức document:
-
-1. Đổi provider/model trong `agent.py`
-   - từ `LitellmModel(model=f"bedrock/{model_id}")`
-   - sang `LitellmModel(model="openai/gpt-5.4-nano")` hoặc cách equivalent mà team dùng
-2. Giữ tạm tên biến cũ `BEDROCK_MODEL_ID` và `BEDROCK_REGION` nếu muốn giảm churn ở Terraform/Lambda env
-3. Khi không còn dùng Bedrock, xem lại:
-   - `os.environ["AWS_REGION_NAME"] = bedrock_region`
-   - narrative trong docs và log messages để tránh hiểu sai current state
-4. Cập nhật tài liệu để nói rõ `OPENAI_API_KEY` không còn chỉ phục vụ observability mà còn có thể là credential cho model calls
-
-Điểm phải test kỹ sau migrate:
-
-- analysis markdown có còn hợp lý về retirement reasoning không
-- recommendations có còn nhất quán với Monte Carlo numbers và projection numbers không
-- model mới có bịa thêm assumption trái với dữ liệu Python precompute không
-- vì agent này làm retirement reasoning, cần kiểm chứng kỹ chất lượng output sau migration dù cost/latency được ưu tiên
-
-Khuyến nghị thực tế:
-
-- bắt đầu với `openai/gpt-5.4-nano`
-- chạy `uv run test_simple.py` và `uv run test_full.py`
-- nếu chất lượng suy giảm ở recommendations hoặc risk framing, cân nhắc nâng model sau khi đã đo chi phí/latency
+```json
+{
+  "success": 1,
+  "message": "Retirement analysis completed",
+  "model": "openai/gpt-5.4-nano",
+  "timing": {
+    "create_s": 0.48,
+    "agent_s": 18.96,
+    "db_s": 0.55,
+    "total_s": 20.01,
+    "lambda_total_s": 20.01
+  }
+}
+```
 
 ## Tóm tắt
 
-`backend/retirement` là agent retirement-focused của Part 6, nhưng current state của nó không đẩy toán học cho model mà tính trước trong Python rồi mới nhờ LLM viết phân tích. Repo hiện vẫn Bedrock-centric ở naming và init path; README này ghi đúng trạng thái đó và thêm hướng dẫn thực tế để chuyển sang `openai/gpt-5.4-nano` khi cần.
+`backend/retirement` là agent retirement-focused của Part 6, tính toán định lượng trong Python (Monte Carlo, projections) rồi nhờ LLM viết phân tích. Đã migrate hoàn toàn từ Bedrock sang OpenAI (`openai/gpt-5.4-nano` qua `MODEL_ID_RETIREMENT`). Có `[TIMING]` log đầy đủ, response body chứa model + timing.

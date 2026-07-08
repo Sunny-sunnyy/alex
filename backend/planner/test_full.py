@@ -49,7 +49,7 @@ def get_queue_url():
 def main():
     """Run the full test."""
     print("=" * 70)
-    print("🎯 Alex Agent Orchestration - Full Test")
+    print("Alex Agent Orchestration - Full Test")
     print("=" * 70)
     
     # Display AWS info
@@ -57,17 +57,16 @@ def main():
     region = boto3.Session().region_name
     print(f"AWS Account: {account_id}")
     print(f"AWS Region: {region}")
-    print(f"Bedrock Region: {os.getenv('BEDROCK_REGION', 'us-west-2')}")
-    print(f"Bedrock Model: {os.getenv('BEDROCK_MODEL_ID', 'Not set')}")
+    print(f"Model: {os.getenv('MODEL_ID_PLANNER', 'openai/gpt-5.4-nano')}")
     print()
     
     # Check for test user
-    print("📊 Checking test data...")
+    print("Checking test data...")
     test_user_id = 'test_user_001'
     user = db.users.find_by_clerk_id(test_user_id)
     
     if not user:
-        print("❌ Test user not found. Please run database setup first:")
+        print("Test user not found. Please run database setup first:")
         print("   cd ../database && uv run reset_db.py --with-test-data")
         return 1
     
@@ -83,7 +82,7 @@ def main():
     print(f"✓ Portfolio: {len(accounts)} accounts, {total_positions} positions")
     
     # Create test job
-    print("\n🚀 Creating test job...")
+    print("\nCreating test job...")
     job_data = {
         'clerk_user_id': test_user_id,
         'job_type': 'portfolio_analysis',
@@ -99,7 +98,7 @@ def main():
     print(f"✓ Created job: {job_id}")
     
     # Send to SQS
-    print("\n📤 Sending job to SQS queue...")
+    print("\nSending job to SQS queue...")
     try:
         queue_url = get_queue_url()
         response = sqs.send_message(
@@ -108,11 +107,11 @@ def main():
         )
         print(f"✓ Message sent: {response['MessageId']}")
     except Exception as e:
-        print(f"❌ Failed to send to SQS: {e}")
+        print(f"Failed to send to SQS: {e}")
         return 1
     
     # Monitor job
-    print("\n⏳ Monitoring job progress (timeout: 3 minutes)...")
+    print("\nMonitoring job progress (timeout: 3 minutes)...")
     print("-" * 50)
     
     start_time = time.time()
@@ -130,27 +129,27 @@ def main():
         
         if status == 'completed':
             print("-" * 50)
-            print("✅ Job completed successfully!")
+            print("Job completed successfully!")
             break
         elif status == 'failed':
             print("-" * 50)
-            print(f"❌ Job failed: {job.get('error_message', 'Unknown error')}")
+            print(f"Job failed: {job.get('error_message', 'Unknown error')}")
             return 1
         
         time.sleep(2)
     else:
         print("-" * 50)
-        print("❌ Job timed out after 3 minutes")
+        print("Job timed out after 3 minutes")
         return 1
     
     # Display results
     print("\n" + "=" * 70)
-    print("📋 ANALYSIS RESULTS")
+    print("ANALYSIS RESULTS")
     print("=" * 70)
     
     # Orchestrator summary
     if job.get('summary_payload'):
-        print("\n🎯 Orchestrator Summary:")
+        print("\nOrchestrator Summary:")
         summary = job['summary_payload']
         print(f"Summary: {summary.get('summary', 'N/A')}")
         
@@ -166,7 +165,7 @@ def main():
     
     # Report analysis
     if job.get('report_payload'):
-        print("\n📝 Portfolio Report:")
+        print("\nPortfolio Report:")
         report = job['report_payload']
         analysis = report.get('analysis', '')
         print(f"  Length: {len(analysis)} characters")
@@ -178,7 +177,7 @@ def main():
     
     # Charts
     if job.get('charts_payload'):
-        print(f"\n📊 Visualizations: {len(job['charts_payload'])} charts")
+        print(f"\nVisualizations: {len(job['charts_payload'])} charts")
         for chart_key, chart_data in job['charts_payload'].items():
             print(f"  • {chart_key}: {chart_data.get('title', 'Untitled')}")
             if chart_data.get('data'):
@@ -186,14 +185,14 @@ def main():
     
     # Retirement projections
     if job.get('retirement_payload'):
-        print("\n🎯 Retirement Analysis:")
+        print("\nRetirement Analysis:")
         ret = job['retirement_payload']
         print(f"  Success Rate: {ret.get('success_rate', 'N/A')}%")
         print(f"  Projected Value: ${ret.get('projected_value', 0):,.0f}")
         print(f"  Years to Retirement: {ret.get('years_to_retirement', 'N/A')}")
     
     print("\n" + "=" * 70)
-    print("✅ Full test completed successfully!")
+    print("Full test completed successfully!")
     print("=" * 70)
     
     return 0

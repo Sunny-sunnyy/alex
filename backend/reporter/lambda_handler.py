@@ -1,9 +1,11 @@
 """
 Report Writer Agent Lambda Handler
+Uses OpenAI model via LiteLLM.
 """
 
 import os
 import json
+import time
 import asyncio
 import logging
 from typing import Dict, Any
@@ -27,7 +29,7 @@ except ImportError:
 from src import Database
 
 from templates import REPORTER_INSTRUCTIONS
-from agent import create_agent, ReporterContext
+from agent import create_agent, ReporterContext, MODEL_ID
 from observability import observe
 
 logger = logging.getLogger()
@@ -51,10 +53,16 @@ async def run_reporter_agent(
 ) -> Dict[str, Any]:
     """Run the reporter agent to generate analysis."""
 
+    t_start = time.monotonic()
+    logger.info(f"run_reporter_agent START | job={job_id} | model={MODEL_ID}")
+
     # Create agent with tools and context
-    model, tools, task, context = create_agent(job_id, portfolio_data, user_data, db)
+    model, tools, task, context, effective_model = create_agent(job_id, portfolio_data, user_data, db)
+    t_create = time.monotonic() - t_start
+    logger.info(f"[TIMING] Agent creation phase: {t_create:.2f}s")
 
     # Run agent with context
+    t_agent_start = time.monotonic()
     with trace("Reporter Agent"):
         agent = Agent[ReporterContext](  # Specify the context type
             name="Report Writer", instructions=REPORTER_INSTRUCTIONS, model=model, tools=tools
@@ -81,25 +89,43 @@ async def run_reporter_agent(
                     logger.error(f"Reporter score is too low: {score}")
                     response = "I'm sorry, I'm not able to generate a report for you. Please try again later."
 
-        # Save the report to database
-        report_payload = {
-            "content": response,
-            "generated_at": datetime.utcnow().isoformat(),
-            "agent": "reporter",
-        }
+    t_agent = time.monotonic() - t_agent_start
+    logger.info(f"[TIMING] Agent run phase: {t_agent:.2f}s | model={effective_model}")
 
-        success = db.jobs.update_report(job_id, report_payload)
+    # Save the report to database
+    t_db_start = time.monotonic()
+    report_payload = {
+        "content": response,
+        "generated_at": datetime.utcnow().isoformat(),
+        "agent": "reporter",
+    }
 
-        if not success:
-            logger.error(f"Failed to save report for job {job_id}")
+    success = db.jobs.update_report(job_id, report_payload)
 
-        return {
-            "success": success,
-            "message": "Report generated and stored"
-            if success
-            else "Report generated but failed to save",
-            "final_output": result.final_output,
-        }
+    if not success:
+        logger.error(f"Failed to save report for job {job_id}")
+
+    t_db = time.monotonic() - t_db_start
+    t_total = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] run_reporter_agent TOTAL: {t_total:.2f}s "
+        f"(create={t_create:.2f}s, agent={t_agent:.2f}s, db={t_db:.2f}s) | model={effective_model}"
+    )
+
+    return {
+        "success": success,
+        "message": "Report generated and stored"
+        if success
+        else "Report generated but failed to save",
+        "final_output": result.final_output,
+        "model": effective_model,
+        "timing": {
+            "create_s": round(t_create, 2),
+            "agent_s": round(t_agent, 2),
+            "db_s": round(t_db, 2),
+            "total_s": round(t_total, 2),
+        },
+    }
 
 
 def lambda_handler(event, context):
@@ -113,6 +139,9 @@ def lambda_handler(event, context):
         "user_data": {...}
     }
     """
+    t_lambda_start = time.monotonic()
+    logger.info(f"lambda_handler START | model={MODEL_ID}")
+
     # Wrap entire handler with observability context
     with observe() as observability:
         try:
@@ -213,12 +242,20 @@ def lambda_handler(event, context):
                 run_reporter_agent(job_id, portfolio_data, user_data, db, observability)
             )
 
+            t_total = time.monotonic() - t_lambda_start
+            result['timing']['lambda_total_s'] = round(t_total, 2)
+            logger.info(
+                f"[TIMING] lambda_handler TOTAL: {t_total:.2f}s | "
+                f"job={job_id} | model={MODEL_ID}"
+            )
+
             logger.info(f"Reporter completed for job {job_id}")
 
             return {"statusCode": 200, "body": json.dumps(result)}
 
         except Exception as e:
-            logger.error(f"Error in reporter: {e}", exc_info=True)
+            t_total = time.monotonic() - t_lambda_start
+            logger.error(f"Lambda handler error after {t_total:.2f}s: {e}", exc_info=True)
             return {"statusCode": 500, "body": json.dumps({"success": False, "error": str(e)})}
 
 

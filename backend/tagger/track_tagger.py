@@ -69,6 +69,8 @@ class TaggerLogTracker:
             color = '\033[96m'  # Cyan
         elif 'Successfully classified' in message:
             color = '\033[94m'  # Blue
+        elif '[TIMING]' in message:
+            color = '\033[96m'  # Cyan
         elif 'START RequestId' in message or 'END RequestId' in message:
             color = '\033[95m'  # Magenta
         elif 'INIT_START' in message:

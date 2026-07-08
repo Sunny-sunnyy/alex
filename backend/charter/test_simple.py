@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Simple test for Charter agent
+Simple test for Charter agent — OpenAI model.
 """
 
-import asyncio
+import time
 import json
 from dotenv import load_dotenv
 
@@ -12,6 +12,7 @@ load_dotenv(override=True)
 from src import Database
 from src.schemas import JobCreate
 from lambda_handler import lambda_handler
+from agent import MODEL_ID
 
 
 def test_charter():
@@ -56,14 +57,12 @@ def test_charter():
     }
 
     print("Testing Charter Agent...")
+    print(f"Model: {MODEL_ID}")
     print("=" * 60)
 
-    import sys
-
-    print("About to call lambda_handler...", flush=True)
-    sys.stdout.flush()
+    t_start = time.monotonic()
     result = lambda_handler(test_event, None)
-    print("lambda_handler returned", flush=True)
+    t_total = time.monotonic() - t_start
 
     print(f"Status Code: {result['statusCode']}")
 
@@ -71,14 +70,21 @@ def test_charter():
         body = json.loads(result["body"])
         print(f"Success: {body.get('success', False)}")
         print(f"Message: {body.get('message', 'N/A')}")
+        print(f"Model: {body.get('model', 'unknown')}")
+        timing = body.get('timing', {})
+        if timing:
+            print(f"Timing: create={timing.get('create_s')}s, "
+                  f"agent={timing.get('agent_s')}s, "
+                  f"db={timing.get('db_s')}s, "
+                  f"lambda_total={timing.get('lambda_total_s')}s")
 
         # Check what charts were created
         job = db.jobs.find_by_id(job_id)
         if job and job.get("charts_payload"):
-            print(f"\n📊 Charts Created ({len(job['charts_payload'])} total):")
+            print(f"\nCharts Created ({len(job['charts_payload'])} total):")
             print("=" * 50)
             for chart_key, chart_data in job["charts_payload"].items():
-                print(f"\n🎯 Chart: {chart_key}")
+                print(f"\nChart: {chart_key}")
                 print(f"   Title: {chart_data.get('title', 'N/A')}")
                 print(f"   Type: {chart_data.get('type', 'N/A')}")
                 print(f"   Description: {chart_data.get('description', 'N/A')}")
@@ -92,7 +98,7 @@ def test_charter():
                     print(f"     {i+1}. {name}: ${value:,.2f} {color}")
 
         else:
-            print("\n❌ No charts found in database")
+            print("\nNo charts found in database")
     else:
         print(f"Error: {result['body']}")
 
@@ -100,6 +106,7 @@ def test_charter():
     db.jobs.delete(job_id)
     print(f"Deleted test job: {job_id}")
 
+    print(f"Wall-clock total: {t_total:.2f}s")
     print("=" * 60)
 
 

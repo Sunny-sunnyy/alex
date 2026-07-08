@@ -1,17 +1,19 @@
 """
 InstrumentTagger Lambda Handler
 Classifies financial instruments and updates the database.
+Uses OpenAI model via LiteLLM.
 """
 
 import os
 import json
+import time
 import asyncio
 import logging
 from typing import List, Dict, Any
 
 from src import Database
 from src.schemas import InstrumentCreate
-from agent import tag_instruments, classification_to_db_format
+from agent import tag_instruments, classification_to_db_format, MODEL_ID
 from observability import observe
 
 # Configure logging
@@ -24,35 +26,40 @@ db = Database()
 async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, Any]:
     """
     Process and classify instruments asynchronously.
-    
+
     Args:
         instruments: List of instruments to classify
-        
+
     Returns:
         Processing results
     """
+    t_start = time.monotonic()
+    logger.info(f"process_instruments: {len(instruments)} instruments | model={MODEL_ID}")
+
     # Run the classification
-    logger.info(f"Classifying {len(instruments)} instruments")
     classifications = await tag_instruments(instruments)
-    
+
+    t_classify = time.monotonic() - t_start
+    logger.info(f"[TIMING] Classification phase: {t_classify:.2f}s")
+
     # Update database with classifications
     updated = []
     errors = []
-    
+
     for classification in classifications:
         try:
             # Convert to database format
             db_instrument = classification_to_db_format(classification)
-            
+
             # Check if instrument exists
             existing = db.instruments.find_by_symbol(classification.symbol)
-            
+
             if existing:
                 # Update existing instrument
                 update_data = db_instrument.model_dump()
                 # Remove symbol as it's the key
                 del update_data['symbol']
-                
+
                 rows = db.client.update(
                     'instruments',
                     update_data,
@@ -64,21 +71,33 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
                 # Create new instrument
                 db.instruments.create_instrument(db_instrument)
                 logger.info(f"Created {classification.symbol} in database")
-            
+
             updated.append(classification.symbol)
-            
+
         except Exception as e:
             logger.error(f"Error updating {classification.symbol}: {e}")
             errors.append({
                 'symbol': classification.symbol,
                 'error': str(e)
             })
-    
+
+    t_total = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] process_instruments total: {t_total:.2f}s "
+        f"(classify={t_classify:.2f}s, db={t_total - t_classify:.2f}s) | model={MODEL_ID}"
+    )
+
     # Prepare response (convert Pydantic models to dicts)
     return {
         'tagged': len(classifications),
         'updated': updated,
         'errors': errors,
+        'model': MODEL_ID,
+        'timing': {
+            'total_s': round(t_total, 2),
+            'classify_s': round(t_classify, 2),
+            'db_s': round(t_total - t_classify, 2),
+        },
         'classifications': [
             {
                 'symbol': c.symbol,
@@ -105,6 +124,9 @@ def lambda_handler(event, context):
         ]
     }
     """
+    t_lambda_start = time.monotonic()
+    logger.info(f"lambda_handler START | model={MODEL_ID}")
+
     # Wrap entire handler with observability context
     with observe():
         try:
@@ -120,13 +142,21 @@ def lambda_handler(event, context):
             # Process all instruments in a single async context
             result = asyncio.run(process_instruments(instruments))
 
+            t_total = time.monotonic() - t_lambda_start
+            result['timing']['lambda_total_s'] = round(t_total, 2)
+            logger.info(
+                f"[TIMING] lambda_handler TOTAL: {t_total:.2f}s | "
+                f"instruments={len(instruments)} | model={MODEL_ID}"
+            )
+
             return {
                 'statusCode': 200,
                 'body': json.dumps(result)
             }
 
         except Exception as e:
-            logger.error(f"Lambda handler error: {e}")
+            t_total = time.monotonic() - t_lambda_start
+            logger.error(f"Lambda handler error after {t_total:.2f}s: {e}")
             return {
                 'statusCode': 500,
                 'body': json.dumps({'error': str(e)})

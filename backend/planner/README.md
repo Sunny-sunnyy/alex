@@ -11,7 +11,7 @@
 - chạy OpenAI Agents SDK với 3 tools nội bộ để gọi `reporter`, `charter`, `retirement`
 - cập nhật trạng thái job trong Aurora từ `pending` sang `running`, `completed`, hoặc `failed`
 
-Trạng thái hiện tại của repo vẫn Bedrock-centric: planner khởi tạo model qua `LitellmModel(model=f"bedrock/{model_id}")` và set `AWS_REGION_NAME` từ `BEDROCK_REGION`.
+Đã migrate từ Bedrock sang OpenAI: dùng `LitellmModel(model=MODEL_ID)` với env var `MODEL_ID_PLANNER` (default `openai/gpt-5.4-mini`). Planner dùng model mạnh nhất trong các agent Part 6 vì nó giữ quyết định orchestration.
 
 ## Cấu trúc thư mục
 
@@ -59,15 +59,15 @@ flowchart TD
 
 | File | Vai trò |
 | --- | --- |
-| `lambda_handler.py` | Entry point của Lambda `alex-planner`. Parse event từ SQS hoặc direct call, bao handler bằng `observe()`, retry `RateLimitError`, cập nhật trạng thái job và chạy orchestrator async. |
-| `agent.py` | Khai báo `PlannerContext`, 3 `@function_tool` gọi specialist Lambdas, helper `invoke_lambda_agent()`, `handle_missing_instruments()`, `load_portfolio_summary()`, và `create_agent()`. |
+| `lambda_handler.py` | Entry point của Lambda `alex-planner`. Parse event từ SQS hoặc direct call, bao handler bằng `observe()`, retry `RateLimitError`, cập nhật trạng thái job và chạy orchestrator async. Có `[TIMING]` log: pre-processing, agent orchestration, lambda_total. Response body chứa `model` + `timing`. |
+| `agent.py` | Khai báo `PlannerContext`, 3 `@function_tool` gọi specialist Lambdas, helper `invoke_lambda_agent()`, `handle_missing_instruments()`, `load_portfolio_summary()`, và `create_agent()`. Khởi tạo `LitellmModel(model=MODEL_ID)` với `MODEL_ID_PLANNER` từ env. Có `[TIMING]` log. |
 | `templates.py` | Prompt orchestration cực ngắn: chỉ được dùng 3 tools, quy tắc gọi reporter/charter/retirement, và cuối cùng trả `"Done"`. |
 | `market.py` | Tìm symbol trong portfolio của user theo `job_id`, gọi `get_share_price()` cho từng symbol, rồi update `instruments.current_price` trong DB. |
 | `prices.py` | Bọc Polygon API. Nếu có `POLYGON_API_KEY` thì dùng EOD hoặc minute snapshot tùy `POLYGON_PLAN`; nếu lỗi hoặc không có key thì fallback sang số ngẫu nhiên. |
-| `observability.py` | Context manager cho Logfire + LangFuse. Chỉ setup khi có `LANGFUSE_SECRET_KEY`; warning nếu thiếu `OPENAI_API_KEY`; flush và sleep 15 giây khi thoát. |
+| `observability.py` | Context manager cho Logfire + LangFuse. Chỉ setup khi có `LANGFUSE_SECRET_KEY`; flush và sleep 15 giây khi thoát. Log sạch, không emoji. |
 | `package_docker.py` | Build `planner_lambda.zip` bằng Docker image Lambda Python 3.12, export deps từ `uv.lock`, cài package `../database`, copy các module planner, và có tùy chọn `--deploy`. |
-| `test_simple.py` | Local smoke test. Set `MOCK_LAMBDAS=true`, gọi `../database/reset_db.py --with-test-data --skip-drop`, tạo job mới rồi chạy `lambda_handler()` trực tiếp. |
-| `test_full.py` | End-to-end test cho planner qua SQS thật. In AWS account/region, Bedrock region/model, tạo job, gửi message lên queue, poll DB đến khi hoàn thành, rồi in report/charts/retirement/summary. |
+| `test_simple.py` | Local smoke test. Set `MOCK_LAMBDAS=true`, gọi `../database/reset_db.py --with-test-data --skip-drop`, tạo job mới rồi chạy `lambda_handler()` trực tiếp. In model + timing. |
+| `test_full.py` | End-to-end test cho planner qua SQS thật. In AWS account/region, model config, tạo job, gửi message lên queue, poll DB đến khi hoàn thành, rồi in report/charts/retirement/summary. |
 | `test_market.py` | Test riêng flow cập nhật giá bằng market data cho một user cụ thể trong DB. |
 | `pyproject.toml` | UV project của planner. Dependency chính: `openai-agents[litellm]`, `boto3`, `polygon-api-client`, `langfuse`, `tenacity`, `alex-database`. |
 | `aurora_config.json` | File cấu hình cục bộ tồn tại trong folder, không nằm trên execution path của planner code hiện tại. |
@@ -75,10 +75,10 @@ flowchart TD
 
 Điểm implementation đáng chú ý:
 
+- `MODEL_ID_PLANNER` default là `openai/gpt-5.4-mini` — model mạnh nhất trong Part 6 vì giữ quyết định orchestration.
 - `MOCK_LAMBDAS=true` chỉ làm mock các specialist Lambda trong `invoke_lambda_agent()`. Planner vẫn chạm DB thật trong `test_simple.py`.
 - `handle_missing_instruments()` gọi `alex-tagger` trực tiếp qua boto3 trước khi model orchestration bắt đầu.
 - `load_portfolio_summary()` chỉ trả thống kê tổng hợp, không nạp full portfolio vào prompt.
-- `create_agent()` default model hiện tại là `us.anthropic.claude-3-7-sonnet-20250219-v1:0`, dù Terraform Part 6 sample đang khuyến nghị `us.amazon.nova-pro-v1:0`.
 - Planner không inject tên Lambda specialist từ Terraform; nếu không set env, code dùng default `alex-tagger`, `alex-reporter`, `alex-charter`, `alex-retirement`.
 
 ## Workflow chính
@@ -110,7 +110,7 @@ sequenceDiagram
     RT-->>A: saved retirement payload
     A-->>L: final_output = "Done"
     L->>D: update_status(job_id, completed)
-    L-->>S: statusCode 200
+    L-->>S: statusCode 200 + model + timing
 ```
 
 Luồng lỗi:
@@ -155,7 +155,7 @@ graph LR
 - `backend/database`: source of truth cho `Database`, repositories `jobs/users/accounts/positions/instruments`, và Aurora Data API integration.
 - `backend/researcher` và `backend/ingest`: planner không gọi trực tiếp, nhưng reporter phụ thuộc data đã được ingest vào S3 Vectors từ các part trước.
 - `terraform/5_database`: cung cấp `AURORA_CLUSTER_ARN` và `AURORA_SECRET_ARN`.
-- `terraform/6_agents`: deploy queue `alex-analysis-jobs`, Lambda `alex-planner`, IAM, S3 package bucket, và inject env cho planner.
+- `terraform/6_agents`: deploy queue `alex-analysis-jobs`, Lambda `alex-planner`, IAM, S3 package bucket, và inject `MODEL_ID_PLANNER` + env vars cho planner.
 
 ## Cross-cutting scripts trong `backend/`
 
@@ -179,27 +179,22 @@ Workflow thực tế thường là:
 4. chạy `backend/test_full.py` hoặc `backend/test_multiple_accounts.py`
 5. mở `backend/watch_agents.py` nếu cần soi log CloudWatch liên tục
 
-Lưu ý về current implementation:
-
-- `deploy_all_lambdas.py` force recreate Lambda qua `terraform taint`, nên đây không phải deploy incremental nhẹ.
-- `backend/test_full.py` và `backend/planner/test_full.py` đều in thông tin Bedrock region/model ra console; khi migrate provider phải review narrative và output của các script này.
-- `watch_agents.py` chỉ xem log group CloudWatch; nó không tự biết provider model nào đang chạy, nhưng log text liên quan Bedrock/LangFuse có thể cần đổi sau migration.
-
 ## Cách sử dụng nhanh
-
-Điều kiện tối thiểu:
-
-- đã hoàn thành Part 5 database và Part 6 infrastructure nếu muốn chạy AWS flow thật
-- có `.env` hoặc env tương đương cho DB, model, Polygon, và observability
-- Docker đang chạy nếu cần build package
-
-Các lệnh thường dùng:
 
 ```bash
 cd backend/planner
+
+# Test local (dùng MODEL_ID_PLANNER từ env, default openai/gpt-5.4-mini)
 uv run test_simple.py
+
+# Test với model khác
+MODEL_ID_PLANNER=openai/gpt-5.4-nano uv run test_simple.py
+
+# Test Lambda đã deploy
 uv run test_full.py
 uv run test_market.py
+
+# Package và deploy
 uv run package_docker.py
 uv run package_docker.py --deploy
 ```
@@ -217,72 +212,42 @@ uv run test_scale.py
 uv run watch_agents.py --region us-east-1 --lookback 5 --interval 2
 ```
 
-Env vars current state quan trọng với planner:
+## Environment variables
 
-| Biến | Dùng ở đâu |
-| --- | --- |
-| `AURORA_CLUSTER_ARN` / `AURORA_SECRET_ARN` / `DATABASE_NAME` | Shared database package dùng để đọc job, account, position, instrument và update status. |
-| `BEDROCK_MODEL_ID` | `agent.py` chọn model cho planner. |
-| `BEDROCK_REGION` | `agent.py` set `AWS_REGION_NAME` cho LiteLLM Bedrock. |
-| `DEFAULT_AWS_REGION` | Terraform inject theo `aws_region`; các script test boto3 thường dùng region mặc định của session. |
-| `POLYGON_API_KEY` / `POLYGON_PLAN` | `prices.py` và `market.py` dùng để refresh market prices. |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | `observability.py`. |
-| `OPENAI_API_KEY` | trạng thái hiện tại chủ yếu phục vụ tracing/export cho OpenAI Agents SDK và LangFuse, không phải provider model chính của planner. |
-| `TAGGER_FUNCTION` / `REPORTER_FUNCTION` / `CHARTER_FUNCTION` / `RETIREMENT_FUNCTION` | Tùy chọn override; nếu không set thì planner dùng default `alex-*`. |
-| `MOCK_LAMBDAS` | Chỉ dùng cho local test để mock specialist Lambda calls. |
+| Biến | Dùng ở đâu | Mặc định |
+| --- | --- | --- |
+| `MODEL_ID_PLANNER` | `agent.py` — model string cho `LitellmModel` | `openai/gpt-5.4-mini` |
+| `OPENAI_API_KEY` | LiteLLM — credential cho OpenAI API | bắt buộc |
+| `AURORA_CLUSTER_ARN` / `AURORA_SECRET_ARN` / `DATABASE_NAME` | Shared database package dùng để đọc job, account, position, instrument và update status. | bắt buộc |
+| `DEFAULT_AWS_REGION` | boto3 clients | `us-east-1` |
+| `POLYGON_API_KEY` / `POLYGON_PLAN` | `prices.py` và `market.py` dùng để refresh market prices. | optional |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | `observability.py`. | optional |
+| `TAGGER_FUNCTION` / `REPORTER_FUNCTION` / `CHARTER_FUNCTION` / `RETIREMENT_FUNCTION` | Tùy chọn override; nếu không set thì planner dùng default `alex-*`. | optional |
+| `MOCK_LAMBDAS` | Chỉ dùng cho local test để mock specialist Lambda calls. | optional |
 
-## Cách chuyển sang OpenAI models
+## Log output
 
-Trạng thái hiện tại cần giữ rõ ràng:
+```
+[TIMING] create_agent: 0.00s | model=openai/gpt-5.4-mini
+[TIMING] Pre-processing phase: 1.23s
+[TIMING] Agent orchestration phase: 8.07s | model=openai/gpt-5.4-mini
+[TIMING] run_orchestrator TOTAL: 9.30s (pre=1.23s, agent=8.07s) | model=openai/gpt-5.4-mini
+[TIMING] lambda_handler TOTAL: 9.30s | job=... | model=openai/gpt-5.4-mini
+```
 
-- planner hiện dùng `LitellmModel(model=f"bedrock/{model_id}")`
-- Terraform Part 6 vẫn inject `BEDROCK_MODEL_ID` và `BEDROCK_REGION`
-- các test và log scripts hiện vẫn nói ngôn ngữ Bedrock ở một số chỗ
+Response body:
 
-Migration guidance cho folder này:
-
-- Model đề xuất: `openai/gpt-5.4-mini`
-- Planner nên là model mạnh nhất trong Part 6 vì nó giữ quyết định orchestration
-- Các script test và log đang in chi tiết Bedrock nên cần được rà soát khi migrate
-
-Vì planner ra quyết định gọi agent nào và theo thứ tự nào, đây là folder duy nhất trong nhóm backend Part 6 mà mapping được chốt ở mức `mini` thay vì `nano`.
-
-Các file cần rà soát nếu migrate thật:
-
-- `backend/planner/agent.py`
-- `backend/planner/lambda_handler.py`
-- `backend/planner/test_full.py`
-- `backend/package_docker.py`
-- `backend/deploy_all_lambdas.py`
-- `backend/test_full.py`
-- `backend/watch_agents.py`
-- `terraform/6_agents/main.tf`
-- `terraform/6_agents/variables.tf`
-- `terraform/6_agents/terraform.tfvars.example`
-
-Cách đổi ở mức code:
-
-1. Trong `backend/planner/agent.py`, thay model init từ:
-   - `LitellmModel(model=f"bedrock/{model_id}")`
-   - sang dạng OpenAI tương ứng, ví dụ `LitellmModel(model="openai/gpt-5.4-mini")`
-2. Xem lại logic chỉ còn ý nghĩa với Bedrock:
-   - `bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")`
-   - `os.environ["AWS_REGION_NAME"] = bedrock_region`
-3. Giữ nguyên tool boundary hiện có giữa planner và specialist Lambdas; migration provider không nên kéo theo refactor orchestration nếu chưa cần.
-
-Cách đổi ở mức Terraform/env:
-
-- Có thể tạm giữ tên biến `BEDROCK_MODEL_ID` và `BEDROCK_REGION` để giảm churn, rồi chỉ đổi giá trị và narrative trong docs.
-- Khi planner thực sự không còn dùng Bedrock, IAM policy `bedrock:InvokeModel*` trong `terraform/6_agents/main.tf` có thể được bỏ hoặc giữ tạm trong giai đoạn chuyển tiếp.
-- `OPENAI_API_KEY` sẽ đổi vai trò từ observability-centric sang model credential thực sự; tài liệu phải nói rõ điều này để tránh hiểu nhầm.
-
-Checklist test lại sau migration:
-
-- `backend/planner/test_simple.py` còn chạy ổn với mock specialist Lambdas không
-- `backend/planner/test_full.py` và `backend/test_full.py` có còn in thông tin provider đúng narrative không
-- `backend/watch_agents.py` có còn hiển thị log dễ hiểu khi message text đổi từ Bedrock sang OpenAI không
-- planner có còn gọi đủ reporter, charter, retirement theo policy trong `templates.py` không
+```json
+{
+  "success": true,
+  "message": "Analysis completed for job ...",
+  "model": "openai/gpt-5.4-mini",
+  "timing": {
+    "lambda_total_s": 9.30
+  }
+}
+```
 
 ## Tóm tắt
 
-`backend/planner` là canonical backend README của Part 6 vì nó vừa là orchestrator thật của hệ agent, vừa là nơi hợp lý nhất để giải thích các script dùng chung trong `backend/`. Trạng thái hiện tại của repo vẫn Bedrock-centric, có thêm bước tagging và market-price refresh trước khi vào model orchestration, và dùng SQS `alex-analysis-jobs` làm trigger chuẩn. Nếu migrate sang OpenAI, planner nên được giữ ở `openai/gpt-5.4-mini` để bảo toàn chất lượng quyết định orchestration.
+`backend/planner` là orchestrator của Part 6, điều phối tagger (pre-processing) và 3 specialist agents (reporter, charter, retirement) qua 3 `@function_tool`. Đã migrate hoàn toàn từ Bedrock sang OpenAI (`openai/gpt-5.4-mini` qua `MODEL_ID_PLANNER`). Dùng SQS `alex-analysis-jobs` làm trigger chuẩn. Có `[TIMING]` log đầy đủ, response body chứa model + timing.

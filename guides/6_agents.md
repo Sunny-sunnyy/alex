@@ -626,3 +626,277 @@ In this guide, you:
 - ✅ Explored monitoring and cost management
 
 Your AI orchestra is now ready to perform! 🎭
+
+---
+
+# Phụ lục: Nhật ký triển khai thực tế Guide 6
+
+Phần này ghi lại chính xác những gì đã làm trong Guide 6, các lỗi đã gặp, cách fix, và trạng thái cuối cùng. Đây là source of truth cho lần triển khai thực tế trên môi trường WSL2 + AWS `ap-southeast-1`.
+
+## Phạm vi thực tế
+
+Guide 6 được triển khai sau khi đã hoàn thành Guides 1-5. Hạ tầng sẵn có:
+
+- SageMaker endpoint `alex-embedding-endpoint` (Part 2)
+- S3 Vectors bucket `alex-vectors-487592470523` (Part 3)
+- Researcher Lambda Function URL (Part 4)
+- Aurora Serverless v2 PostgreSQL + Data API (Part 5)
+- Database schema 5 bảng + 22 instruments seed
+
+## Migration từ Bedrock sang OpenAI — đã hoàn thành trước khi package
+
+Toàn bộ 5 agent đã được migrate từ AWS Bedrock (Nova Pro) sang OpenAI models qua LiteLLM. Đây là thay đổi lớn nhất so với guide gốc.
+
+### Lý do migrate
+
+- Bedrock Nova Pro yêu cầu inference profiles cross-region, phức tạp về IAM
+- OpenAI models qua LiteLLM đơn giản hơn: chỉ cần `OPENAI_API_KEY`
+- Tận dụng được model nhỏ hơn, rẻ hơn cho từng task cụ thể
+
+### Model mapping
+
+| Agent | Env var | Model |
+|---|---|---|
+| Tagger | `MODEL_ID_TAGGER` | `openai/gpt-5.4-nano` |
+| Retirement | `MODEL_ID_RETIREMENT` | `openai/gpt-5.4-nano` |
+| Charter | `MODEL_ID_CHARTER` | `openai/gpt-5.4-nano` |
+| Reporter | `MODEL_ID_REPORTER` | `openai/gpt-5.4-nano` |
+| Planner | `MODEL_ID_PLANNER` | `openai/gpt-5.4-mini` |
+
+### Code changes trong từng agent
+
+Mỗi agent (`agent.py` + `lambda_handler.py`) đã được cập nhật:
+
+1. Xóa `bedrock_region` / `bedrock_model_id` khỏi parameter
+2. Thay `LitellmModel(model=f"bedrock/{model_id}")` bằng model từ env var riêng
+3. Xóa `os.environ["AWS_REGION_NAME"] = bedrock_region` (không cần cho OpenAI)
+4. Thêm `[TIMING]` log: `create`, `agent`, `db`, `lambda_total`
+5. Response body chứa `model` + `timing` breakdown
+
+### Terraform thay đổi
+
+Trong `terraform/6_agents/`:
+
+- `variables.tf`: Xóa `bedrock_model_id` + `bedrock_region`, thêm 5 biến `model_id_<agent>` có default
+- `main.tf`: Mỗi Lambda inject `MODEL_ID_<AGENT>` thay vì `BEDROCK_MODEL_ID`/`BEDROCK_REGION`. Xóa Bedrock IAM policy
+- `outputs.tf`: Thêm `model_config` output
+- `terraform.tfvars.example`: Cập nhật với 5 model vars + `openai_api_key` bắt buộc
+- `terraform.tfvars`: Đã cấu hình đầy đủ với OpenAI models + API key
+
+## Step 3: Test local — ALL PASSED
+
+```bash
+cd backend && uv run test_simple.py
+```
+
+Kết quả: **Passed: 5/5**
+
+Mỗi agent test với MOCK_LAMBDAS=true, dùng model thật qua OpenAI API. Tất cả đều pass.
+
+## Step 4: Package Lambda Functions
+
+### Lỗi WSL2 + Docker Permission
+
+Khi chạy `uv run package_docker.py` ở `backend/`:
+
+```
+PermissionError: [Errno 1] Operation not permitted: 
+'/tmp/tmpXXX/package/opentelemetry_exporter_otlp_proto_common-1.37.0.dist-info'
+```
+
+**Root cause**: Docker container chạy với user `root`, `pip install --target ./package` tạo files thuộc sở hữu của root trong `/tmp/...`. Khi Python host (user thường) cố cleanup `TemporaryDirectory`, nó không thể xóa root-owned files trên WSL2. Đây là known WSL2 issue.
+
+**Quan trọng**: ZIP files **đã được tạo thành công** (86-88 MB each) — dòng "Package created" xuất hiện trước mỗi error. Lỗi chỉ xảy ra ở bước dọn dẹp temp folder.
+
+### Fix
+
+Sửa `main()` trong từng agent's `package_docker.py` để bắt `PermissionError`:
+
+```python
+try:
+    zip_path = package_lambda()
+except PermissionError:
+    # WSL2 + Docker: temp dir cleanup fails on root-owned files.
+    # The ZIP was already created before cleanup runs.
+    zip_path = Path(__file__).parent.absolute() / "<agent>_lambda.zip"
+    if not zip_path.exists():
+        print("Error: Package failed - ZIP file not created")
+        sys.exit(1)
+    print("Note: ignoring WSL2 permission error during temp directory cleanup")
+```
+
+**Đã thử nhưng KHÔNG hoạt động**: `tempfile.TemporaryDirectory(ignore_cleanup_errors=True)` — Python's `_resetperms()` gọi `os.chmod(path, 0o700)` trả về `EPERM` (Errno 1) trên WSL2, không được `ignore_cleanup_errors` xử lý.
+
+### Kết quả sau fix
+
+```
+Packaging TAGGER agent...   ✅ Created: tagger_lambda.zip (86.4 MB)
+Packaging REPORTER agent...  ✅ Created: reporter_lambda.zip (86.5 MB)
+Packaging CHARTER agent...   ✅ Created: charter_lambda.zip (87.6 MB)
+Packaging RETIREMENT agent...✅ Created: retirement_lambda.zip (86.4 MB)
+Packaging PLANNER agent...   ✅ Created: planner_lambda.zip (87.9 MB)
+Packaged: 5/5
+✅ ALL LAMBDA FUNCTIONS PACKAGED SUCCESSFULLY!
+```
+
+## Step 5-6: Terraform deploy
+
+```bash
+cd terraform/6_agents
+terraform init
+terraform apply
+```
+
+Kết quả: **22 resources created**, bao gồm:
+- 5 Lambda functions với memory/timeout phù hợp
+- S3 bucket `alex-lambda-packages-487592470523`
+- SQS queue `alex-analysis-jobs` + DLQ
+- IAM role + policy
+- CloudWatch log groups
+- Lambda event source mapping (SQS -> Planner)
+
+Không còn Bedrock IAM policy — thay bằng OpenAI API key inject qua env var.
+
+### Model config output
+
+```
+model_config = {
+  charter    = "openai/gpt-5.4-nano"
+  planner    = "openai/gpt-5.4-mini"
+  reporter   = "openai/gpt-5.4-nano"
+  retirement = "openai/gpt-5.4-nano"
+  tagger     = "openai/gpt-5.4-nano"
+}
+```
+
+## Step 7: Deploy Lambda code
+
+```bash
+cd backend && uv run deploy_all_lambdas.py
+```
+
+Script tự động:
+1. Taint tất cả 5 Lambda functions để force recreate
+2. Upload ZIP files mới lên S3
+3. Terraform apply — destroy + recreate từng Lambda
+4. Tất cả 5 Lambda active với code mới nhất
+
+## Step 8: Test deployed agents
+
+### Test full system qua SQS
+
+```bash
+cd backend && uv run test_full.py
+```
+
+Kết quả: **Job completed successfully trong 54 giây**
+
+```
+📊 Analysis Results:
+📝 Report Generated: 10427 characters
+📊 Charts Created: 5 visualizations
+   - sector_breakdown (donut, 10 data points)
+   - geographic_exposure (bar, 5 data points)
+   - account_type_allocation (pie, 3 data points)
+   - asset_class_distribution (pie, 4 data points)
+   - top_holdings_concentration (horizontalBar, 5 data points)
+🎯 Retirement Analysis: 10571 characters
+```
+
+Toàn bộ pipeline hoạt động: Planner điều phối -> Tagger phân loại -> Reporter + Charter + Retirement chạy song song -> kết quả lưu vào database.
+
+## Lỗi và bẫy quan trọng
+
+### Lỗi 1: WSL2 `package_docker.py` PermissionError
+
+- **triệu chứng**: `PermissionError: [Errno 1] Operation not permitted` khi cleanup temp dir
+- **root cause**: Docker (root) tạo files trong `/tmp`, Python host (user) không xóa được trên WSL2
+- **cách fix**: Bắt `PermissionError` trong `main()`, kiểm tra ZIP đã tồn tại
+- **không fix được bằng**: `ignore_cleanup_errors=True` (EPERM không được Python stdlib xử lý)
+
+### Lỗi 2: Terraform provider crash
+
+- **triệu chứng**: `Error: Plugin did not respond` khi chạy `terraform apply` lần đầu
+- **root cause**: AWS provider transient error
+- **cách fix**: Chạy lại `terraform apply`
+
+### Lỗi 3: Biến local không visible trong except block
+
+- **triệu chứng**: `NameError: name 'tagger_dir' is not defined` trong `except PermissionError`
+- **root cause**: `tagger_dir` được định nghĩa trong `package_lambda()`, không phải trong `main()`
+- **cách fix**: Dùng `Path(__file__).parent.absolute()` trực tiếp trong except block
+
+## Các lệnh cốt lõi
+
+### Test local tất cả agent
+
+```bash
+cd backend && uv run test_simple.py
+```
+
+### Package tất cả Lambda
+
+```bash
+cd backend && uv run package_docker.py
+```
+
+### Deploy infrastructure
+
+```bash
+cd terraform/6_agents
+terraform init
+terraform apply
+```
+
+### Deploy Lambda code updates
+
+```bash
+cd backend && uv run deploy_all_lambdas.py
+```
+
+### Test full system
+
+```bash
+cd backend && uv run test_full.py
+```
+
+### Kiểm tra model config từ Terraform output
+
+```bash
+cd terraform/6_agents && terraform output model_config
+```
+
+### Xem CloudWatch logs
+
+```bash
+aws logs tail /aws/lambda/alex-planner --since 10m --region ap-southeast-1
+```
+
+## Trạng thái kết thúc Guide 6
+
+1. Toàn bộ 5 agent đã migrate từ Bedrock sang OpenAI models qua LiteLLM
+2. Tất cả Lambda functions đã được deploy và active trên AWS
+3. `test_simple.py`: 5/5 PASSED
+4. `test_full.py`: Job completed trong 54s, đầy đủ report + charts + retirement
+5. SQS orchestration hoạt động: Planner nhận message, điều phối 4 worker agents
+6. ZIP files (86-88 MB each) đã được tạo và upload lên S3
+7. `terraform.tfvars` đã cấu hình đầy đủ với OpenAI models + API key
+8. README files đã được cập nhật cho tất cả agent directories + terraform/6_agents
+
+## Handoff sang Guide 7
+
+Trước khi sang `guides/7_frontend.md`, cần xác minh:
+
+1. Tất cả 5 Lambda đang Active trong AWS Console
+2. `terraform output` trong `6_agents` trả về đúng model_config
+3. SQS queue `alex-analysis-jobs` không có message tồn đọng
+4. CloudWatch logs không có error pattern lặp lại
+5. Database có jobs hoàn thành từ các lần test
+6. `.env` đã có `OPENAI_API_KEY`
+
+Các giá trị quan trọng cho Guide 7:
+
+- 5 Lambda function names: `alex-planner`, `alex-tagger`, `alex-reporter`, `alex-charter`, `alex-retirement`
+- SQS queue URL: `https://sqs.ap-southeast-1.amazonaws.com/487592470523/alex-analysis-jobs`
+- Region: `ap-southeast-1`
+- Model config: 4 agents dùng `gpt-5.4-nano`, Planner dùng `gpt-5.4-mini`

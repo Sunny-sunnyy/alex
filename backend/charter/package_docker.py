@@ -133,7 +133,16 @@ def main():
         sys.exit(1)
     
     # Package the Lambda
-    zip_path = package_lambda()
+    try:
+        zip_path = package_lambda()
+    except PermissionError:
+        # WSL2 + Docker: temp dir cleanup fails on root-owned files.
+        # The ZIP was already created before cleanup runs.
+        zip_path = Path(__file__).parent.absolute() / "charter_lambda.zip"
+        if not zip_path.exists():
+            print("Error: Package failed - ZIP file not created")
+            sys.exit(1)
+        print("Note: ignoring WSL2 permission error during temp directory cleanup")
     
     # Deploy if requested
     if args.deploy:

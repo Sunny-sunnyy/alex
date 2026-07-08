@@ -1,9 +1,11 @@
 """
 Financial Planner Orchestrator Lambda Handler
+Uses OpenAI model via LiteLLM.
 """
 
 import os
 import json
+import time
 import asyncio
 import logging
 from typing import Dict, Any
@@ -22,7 +24,7 @@ except ImportError:
 from src import Database
 
 from templates import ORCHESTRATOR_INSTRUCTIONS
-from agent import create_agent, handle_missing_instruments, load_portfolio_summary
+from agent import create_agent, handle_missing_instruments, load_portfolio_summary, MODEL_ID
 from market import update_instrument_prices
 from observability import observe
 
@@ -40,24 +42,30 @@ db = Database()
 )
 async def run_orchestrator(job_id: str) -> None:
     """Run the orchestrator agent to coordinate portfolio analysis."""
+    t_start = time.monotonic()
+    logger.info(f"run_orchestrator START | job={job_id} | model={MODEL_ID}")
     try:
         # Update job status to running
         db.jobs.update_status(job_id, 'running')
-        
+
         # Handle missing instruments first (non-agent pre-processing)
+        t_pre_start = time.monotonic()
         await asyncio.to_thread(handle_missing_instruments, job_id, db)
 
         # Update instrument prices after tagging
         logger.info("Planner: Updating instrument prices from market data")
         await asyncio.to_thread(update_instrument_prices, job_id, db)
+        t_pre = time.monotonic() - t_pre_start
+        logger.info(f"[TIMING] Pre-processing phase: {t_pre:.2f}s")
 
         # Load portfolio summary (just statistics, not full data)
         portfolio_summary = await asyncio.to_thread(load_portfolio_summary, job_id, db)
-        
+
         # Create agent with tools and context
-        model, tools, task, context = create_agent(job_id, portfolio_summary, db)
-        
+        model, tools, task, context, effective_model = create_agent(job_id, portfolio_summary, db)
+
         # Run the orchestrator
+        t_agent_start = time.monotonic()
         with trace("Planner Orchestrator"):
             from agent import PlannerContext
             agent = Agent[PlannerContext](
@@ -66,20 +74,29 @@ async def run_orchestrator(job_id: str) -> None:
                 model=model,
                 tools=tools
             )
-            
+
             result = await Runner.run(
                 agent,
                 input=task,
                 context=context,
                 max_turns=20
             )
-            
+
             # Mark job as completed after all agents finish
             db.jobs.update_status(job_id, "completed")
-            logger.info(f"Planner: Job {job_id} completed successfully")
-            
+
+        t_agent = time.monotonic() - t_agent_start
+        t_total = time.monotonic() - t_start
+        logger.info(f"[TIMING] Agent orchestration phase: {t_agent:.2f}s | model={effective_model}")
+        logger.info(
+            f"[TIMING] run_orchestrator TOTAL: {t_total:.2f}s "
+            f"(pre={t_pre:.2f}s, agent={t_agent:.2f}s) | model={effective_model}"
+        )
+        logger.info(f"Planner: Job {job_id} completed successfully")
+
     except Exception as e:
-        logger.error(f"Planner: Error in orchestration: {e}", exc_info=True)
+        t_total = time.monotonic() - t_start
+        logger.error(f"Planner: Error in orchestration after {t_total:.2f}s: {e}", exc_info=True)
         db.jobs.update_status(job_id, 'failed', error_message=str(e))
         raise
 
@@ -96,6 +113,9 @@ def lambda_handler(event, context):
         ]
     }
     """
+    t_lambda_start = time.monotonic()
+    logger.info(f"lambda_handler START | model={MODEL_ID}")
+
     # Wrap entire handler with observability context
     with observe():
         try:
@@ -127,16 +147,27 @@ def lambda_handler(event, context):
             # Run the orchestrator
             asyncio.run(run_orchestrator(job_id))
 
+            t_total = time.monotonic() - t_lambda_start
+            logger.info(
+                f"[TIMING] lambda_handler TOTAL: {t_total:.2f}s | "
+                f"job={job_id} | model={MODEL_ID}"
+            )
+
             return {
                 'statusCode': 200,
                 'body': json.dumps({
                     'success': True,
-                    'message': f'Analysis completed for job {job_id}'
+                    'message': f'Analysis completed for job {job_id}',
+                    'model': MODEL_ID,
+                    'timing': {
+                        'lambda_total_s': round(t_total, 2),
+                    },
                 })
             }
 
         except Exception as e:
-            logger.error(f"Planner: Error in lambda handler: {e}", exc_info=True)
+            t_total = time.monotonic() - t_lambda_start
+            logger.error(f"Planner: Error in lambda handler after {t_total:.2f}s: {e}", exc_info=True)
             return {
                 'statusCode': 500,
                 'body': json.dumps({

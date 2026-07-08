@@ -1,18 +1,26 @@
 """
 Retirement Specialist Agent - provides retirement planning analysis and projections.
+Uses OpenAI models via LiteLLM (migrated from Bedrock).
 """
 
 import os
+import time
 import json
 import logging
 import random
 from typing import Dict, Any
 from datetime import datetime
 
-# No tools needed - simplified agent
 from agents.extensions.models.litellm_model import LitellmModel
+from dotenv import load_dotenv
 
-logger = logging.getLogger()
+# Load environment variables
+load_dotenv(override=True)
+
+logger = logging.getLogger(__name__)
+
+# Model configuration
+MODEL_ID = os.getenv("MODEL_ID_RETIREMENT", "openai/gpt-5.4-nano")
 
 # Context removed - no longer needed without tools
 
@@ -238,13 +246,10 @@ def create_agent(
 ):
     """Create the retirement agent with tools and context."""
 
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-    os.environ["AWS_REGION_NAME"] = bedrock_region
+    t_start = time.monotonic()
+    logger.info(f"create_agent: building task for job={job_id} | model={MODEL_ID}")
 
-    model = LitellmModel(model=f"bedrock/{model_id}")
+    model = LitellmModel(model=MODEL_ID)
 
     # Extract user preferences
     years_until_retirement = user_preferences.get("years_until_retirement", 30)
@@ -321,4 +326,8 @@ Your task: Analyze this retirement readiness data and provide a comprehensive re
 Provide your analysis in clear markdown format with specific numbers and actionable recommendations.
 """
 
-    return model, tools, task
+    t_elapsed = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] create_agent: {t_elapsed:.2f}s | model={MODEL_ID}"
+    )
+    return model, tools, task, MODEL_ID

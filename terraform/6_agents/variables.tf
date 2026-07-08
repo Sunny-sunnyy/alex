@@ -18,14 +18,37 @@ variable "vector_bucket" {
   type        = string
 }
 
-variable "bedrock_model_id" {
-  description = "Bedrock model ID to use for agents"
+# Per-agent OpenAI model configuration
+# Each agent can use a different model optimized for its task
+
+variable "model_id_tagger" {
+  description = "OpenAI model for Tagger agent (instrument classification)"
   type        = string
+  default     = "openai/gpt-5.4-nano"
 }
 
-variable "bedrock_region" {
-  description = "AWS region for Bedrock"
+variable "model_id_retirement" {
+  description = "OpenAI model for Retirement agent (retirement projections)"
   type        = string
+  default     = "openai/gpt-5.4-nano"
+}
+
+variable "model_id_charter" {
+  description = "OpenAI model for Charter agent (chart JSON generation)"
+  type        = string
+  default     = "openai/gpt-5.4-nano"
+}
+
+variable "model_id_reporter" {
+  description = "OpenAI model for Reporter agent (portfolio analysis report)"
+  type        = string
+  default     = "openai/gpt-5.4-nano"
+}
+
+variable "model_id_planner" {
+  description = "OpenAI model for Planner agent (orchestration)"
+  type        = string
+  default     = "openai/gpt-5.4-mini"
 }
 
 variable "sagemaker_endpoint" {
@@ -66,10 +89,9 @@ variable "langfuse_host" {
   default     = "https://us.cloud.langfuse.com"
 }
 
-# OpenAI API key for tracing (required for OpenAI Agents SDK tracing)
+# OpenAI API key (REQUIRED — all agents use OpenAI models via LiteLLM)
 variable "openai_api_key" {
-  description = "OpenAI API key for enabling tracing in OpenAI Agents SDK"
+  description = "OpenAI API key for model access (required for all agents)"
   type        = string
-  default     = ""
   sensitive   = true
 }

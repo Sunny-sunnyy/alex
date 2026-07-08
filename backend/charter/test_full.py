@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Full test for Charter agent via Lambda
+Full test for Charter agent via Lambda — OpenAI model.
 """
 
 import json
-import boto3
 import time
+import boto3
 from dotenv import load_dotenv
 
 from src import Database
@@ -68,24 +68,42 @@ def test_charter_lambda():
 
     # Invoke Lambda
     try:
+        t_start = time.monotonic()
         response = lambda_client.invoke(
             FunctionName="alex-charter",
             InvocationType="RequestResponse",
             Payload=json.dumps({"job_id": job_id, "portfolio_data": portfolio_data}),
         )
+        t_invoke = time.monotonic() - t_start
 
         result = json.loads(response["Payload"].read())
-        print(f"Lambda Response: {json.dumps(result, indent=2)}")
+
+        # Parse body for timing/model info if available
+        body = result.get('body', '{}')
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        model_used = body.get('model', 'unknown')
+        timing = body.get('timing', {})
+
+        print(f"\nLambda invoke time: {t_invoke:.2f}s")
+        print(f"Model: {model_used}")
+        if timing:
+            print(f"Timing: create={timing.get('create_s')}s, "
+                  f"agent={timing.get('agent_s')}s, "
+                  f"db={timing.get('db_s')}s, "
+                  f"lambda_total={timing.get('lambda_total_s')}s")
+        print(f"\nLambda Response: {json.dumps(result, indent=2)}")
 
         # Check database for results
         time.sleep(2)  # Give it a moment
         job = db.jobs.find_by_id(job_id)
 
         if job and job.get("charts_payload"):
-            print(f"\n📊 Charts Created ({len(job['charts_payload'])} total):")
+            print(f"\nCharts Created ({len(job['charts_payload'])} total):")
             print("=" * 50)
             for chart_key, chart_data in job["charts_payload"].items():
-                print(f"\n🎯 Chart: {chart_key}")
+                print(f"\nChart: {chart_key}")
                 print(f"   Title: {chart_data.get('title', 'N/A')}")
                 print(f"   Type: {chart_data.get('type', 'N/A')}")
                 print(f"   Description: {chart_data.get('description', 'N/A')}")
@@ -99,7 +117,7 @@ def test_charter_lambda():
                     print(f"     {i+1}. {name}: ${value:,.2f} {color}")
 
         else:
-            print("\n❌ No charts found in database")
+            print("\nNo charts found in database")
 
     except Exception as e:
         print(f"Error invoking Lambda: {e}")

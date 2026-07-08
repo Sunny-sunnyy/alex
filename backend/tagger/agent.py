@@ -1,8 +1,10 @@
 """
 InstrumentTagger Agent - Classifies financial instruments using OpenAI Agents SDK.
+Uses OpenAI models via LiteLLM (migrated from Bedrock).
 """
 
 import os
+import time
 from typing import List
 import logging
 from decimal import Decimal
@@ -23,9 +25,8 @@ load_dotenv(override=True)
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Get configuration
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-west-2")
+# Model configuration
+MODEL_ID = os.getenv("MODEL_ID_TAGGER", "openai/gpt-5.4-nano")
 
 
 class AllocationBreakdown(BaseModel):
@@ -157,7 +158,8 @@ class InstrumentClassification(BaseModel):
 
 
 async def classify_instrument(
-    symbol: str, name: str, instrument_type: str = "etf"
+    symbol: str, name: str, instrument_type: str = "etf",
+    model_id: str | None = None,
 ) -> InstrumentClassification:
     """
     Classify a financial instrument using OpenAI Agents SDK.
@@ -166,19 +168,17 @@ async def classify_instrument(
         symbol: Ticker symbol
         name: Instrument name
         instrument_type: Type of instrument
+        model_id: Optional model override (e.g. "openai/gpt-5.4-nano").
+                  Defaults to MODEL_ID from env.
 
     Returns:
         Complete classification with allocations
     """
+    t_start = time.monotonic()
+    effective_model = model_id or MODEL_ID
     try:
-        # Initialize the model
-        model_id = BEDROCK_MODEL_ID
-
-        # Set region for LiteLLM Bedrock calls
-        bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-        os.environ["AWS_REGION_NAME"] = bedrock_region
-
-        model = LitellmModel(model=f"bedrock/{model_id}")
+        model = LitellmModel(model=effective_model)
+        logger.info(f"Classifying {symbol} with model={effective_model}")
 
         # Create the classification task
         task = CLASSIFICATION_PROMPT.format(
@@ -198,10 +198,17 @@ async def classify_instrument(
             result = await Runner.run(agent, input=task, max_turns=5)
 
             # Extract the structured output from RunResult using final_output_as
-            return result.final_output_as(InstrumentClassification)
+            classification = result.final_output_as(InstrumentClassification)
+
+        elapsed = time.monotonic() - t_start
+        logger.info(
+            f"[TIMING] classify_instrument({symbol}): {elapsed:.2f}s | model={effective_model}"
+        )
+        return classification
 
     except Exception as e:
-        logger.error(f"Error classifying {symbol}: {e}")
+        elapsed = time.monotonic() - t_start
+        logger.error(f"Error classifying {symbol} after {elapsed:.2f}s: {e}")
         raise
 
 
@@ -216,6 +223,11 @@ async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassificat
         List of classifications
     """
     import asyncio
+
+    t_total_start = time.monotonic()
+    logger.info(
+        f"tag_instruments: starting {len(instruments)} instruments | model={MODEL_ID}"
+    )
 
     # Add retry decorator to classify_instrument calls
     @retry(
@@ -248,8 +260,13 @@ async def tag_instruments(instruments: List[dict]) -> List[InstrumentClassificat
             logger.error(f"Failed to classify {instrument['symbol']}: {e}")
             results.append(None)
 
-    # Filter out None values
-    return [r for r in results if r is not None]
+    successful = [r for r in results if r is not None]
+    t_total = time.monotonic() - t_total_start
+    logger.info(
+        f"[TIMING] tag_instruments: {len(successful)}/{len(instruments)} classified "
+        f"in {t_total:.2f}s | avg={t_total/len(instruments):.2f}s per instrument | model={MODEL_ID}"
+    )
+    return successful
 
 
 def classification_to_db_format(classification: InstrumentClassification) -> InstrumentCreate:

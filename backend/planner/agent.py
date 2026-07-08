@@ -1,8 +1,10 @@
 """
 Financial Planner Orchestrator Agent - coordinates portfolio analysis across specialized agents.
+Uses OpenAI models via LiteLLM (migrated from Bedrock).
 """
 
 import os
+import time
 import json
 import boto3
 import logging
@@ -12,8 +14,14 @@ from dataclasses import dataclass
 
 from agents import function_tool, RunContextWrapper
 from agents.extensions.models.litellm_model import LitellmModel
+from dotenv import load_dotenv
 
-logger = logging.getLogger()
+load_dotenv(override=True)
+
+logger = logging.getLogger(__name__)
+
+# Model configuration
+MODEL_ID = os.getenv("MODEL_ID_PLANNER", "openai/gpt-5.4-nano")
 
 # Initialize Lambda client
 lambda_client = boto3.client("lambda")
@@ -258,17 +266,14 @@ async def invoke_retirement(wrapper: RunContextWrapper[PlannerContext]) -> str:
 
 def create_agent(job_id: str, portfolio_summary: Dict[str, Any], db):
     """Create the orchestrator agent with tools."""
-    
+
+    t_start = time.monotonic()
+    logger.info(f"create_agent: building task for job={job_id} | model={MODEL_ID}")
+
     # Create context for tools
     context = PlannerContext(job_id=job_id)
 
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-    os.environ["AWS_REGION_NAME"] = bedrock_region
-
-    model = LitellmModel(model=f"bedrock/{model_id}")
+    model = LitellmModel(model=MODEL_ID)
 
     tools = [
         invoke_reporter,
@@ -282,4 +287,8 @@ Retirement: {portfolio_summary['years_until_retirement']} years.
 
 Call the appropriate agents."""
 
-    return model, tools, task, context
+    t_elapsed = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] create_agent: {t_elapsed:.2f}s | model={MODEL_ID}"
+    )
+    return model, tools, task, context, MODEL_ID

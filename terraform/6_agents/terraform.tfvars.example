@@ -15,13 +15,15 @@ aurora_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:alex-a
 # Format: alex-vectors-{your-aws-account-id}
 vector_bucket = "alex-vectors-123456789012"
 
-# Bedrock model configuration
-# Using Amazon Nova Pro model for better reliability
-bedrock_model_id = "us.amazon.nova-pro-v1:0"
+# OpenAI model configuration for each agent
+# Each agent uses a different model optimized for its task
+# Leave defaults or override per-agent as needed
 
-# Bedrock region (us-west-2 has the most models available)
-# Note: This can be different from your Lambda region - cross-region calls work fine
-bedrock_region = "us-west-2"
+model_id_tagger     = "openai/gpt-5.4-nano"   # Instrument classification (structured output)
+model_id_retirement = "openai/gpt-5.4-nano"   # Retirement projections (long-form analysis)
+model_id_charter    = "openai/gpt-5.4-nano"   # Chart JSON generation (structured output)
+model_id_reporter   = "openai/gpt-5.4-nano"   # Portfolio report (tools + long-form)
+model_id_planner    = "openai/gpt-5.4-mini"    # Orchestration (decision-making)
 
 # SageMaker endpoint name from Part 2
 # Default: alex-embedding-endpoint
@@ -32,11 +34,12 @@ sagemaker_endpoint = "alex-embedding-endpoint"
 polygon_api_key = "your_polygon_api_key_here"
 polygon_plan    = "free"
 
+# OpenAI API key (REQUIRED — all agents use OpenAI models)
+openai_api_key = "sk-your-openai-api-key-here"
+
 # LangFuse observability configuration (optional)
 # Leave commented out until we use LangFuse - we start LangFuse in Part 8 / Day 4
 
 # langfuse_public_key = "pk-lf-..." # Add your pk-lf-xxx key here - be sure this is the one that starts pk
 # langfuse_secret_key = "sk-lf-..." # Add your sk-lf-xxx key here - be sure this is the one that starts sk
 # langfuse_host       = "https://us.cloud.langfuse.com"
-# OpenAI API key (required for OpenAI Agents SDK tracing to work - no balance or spend needed)
-# openai_api_key = ""

@@ -1,16 +1,24 @@
 """
 Chart Maker Agent - creates visualization data for portfolio analysis.
+Uses OpenAI models via LiteLLM (migrated from Bedrock).
 """
 
 import os
+import time
 import logging
 from typing import Dict, Any
 
 from agents.extensions.models.litellm_model import LitellmModel
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 from templates import CHARTER_INSTRUCTIONS, create_charter_task
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
+
+# Model configuration
+MODEL_ID = os.getenv("MODEL_ID_CHARTER", "openai/gpt-5.4-nano")
 
 
 def analyze_portfolio(portfolio_data: Dict[str, Any]) -> str:
@@ -139,17 +147,11 @@ def analyze_portfolio(portfolio_data: Dict[str, Any]) -> str:
 
 def create_agent(job_id: str, portfolio_data: Dict[str, Any], db=None):
     """Create the charter agent without tools - will output JSON directly."""
-    
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-    os.environ["AWS_REGION_NAME"] = bedrock_region
-    
-    logger.info(f"Charter: Creating agent with model_id={model_id}, region={bedrock_region}")
-    logger.info(f"Charter: Job ID: {job_id}")
-    
-    model = LitellmModel(model=f"bedrock/{model_id}")
+
+    t_start = time.monotonic()
+    logger.info(f"create_agent: building task for job={job_id} | model={MODEL_ID}")
+
+    model = LitellmModel(model=MODEL_ID)
     
     # Analyze the portfolio upfront
     portfolio_analysis = analyze_portfolio(portfolio_data)
@@ -160,5 +162,9 @@ def create_agent(job_id: str, portfolio_data: Dict[str, Any], db=None):
     
     logger.info(f"Charter: Task created, length: {len(task)} characters")
     
+    t_elapsed = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] create_agent: {t_elapsed:.2f}s | model={MODEL_ID}"
+    )
     # Return model and task (no tools or context needed)
-    return model, task
+    return model, task, MODEL_ID

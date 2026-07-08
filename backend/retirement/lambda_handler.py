@@ -1,9 +1,11 @@
 """
 Retirement Specialist Agent Lambda Handler
+Uses OpenAI model via LiteLLM.
 """
 
 import os
 import json
+import time
 import asyncio
 import logging
 from typing import Dict, Any
@@ -28,7 +30,7 @@ except ImportError:
 from src import Database
 
 from templates import RETIREMENT_INSTRUCTIONS
-from agent import create_agent
+from agent import create_agent, MODEL_ID
 from observability import observe
 
 logger = logging.getLogger()
@@ -67,17 +69,23 @@ def get_user_preferences(job_id: str) -> Dict[str, Any]:
 )
 async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> Dict[str, Any]:
     """Run the retirement specialist agent."""
-    
+
+    t_start = time.monotonic()
+    logger.info(f"run_retirement_agent START | job={job_id} | model={MODEL_ID}")
+
     # Get user preferences
     user_preferences = get_user_preferences(job_id)
-    
+
     # Initialize database
     db = Database()
-    
+
     # Create agent (simplified - no tools or context)
-    model, tools, task = create_agent(job_id, portfolio_data, user_preferences, db)
-    
+    model, tools, task, effective_model = create_agent(job_id, portfolio_data, user_preferences, db)
+    t_create = time.monotonic() - t_start
+    logger.info(f"[TIMING] Agent creation phase: {t_create:.2f}s")
+
     # Run agent (simplified - no context)
+    t_agent_start = time.monotonic()
     with trace("Retirement Agent"):
         agent = Agent(
             name="Retirement Specialist",
@@ -85,7 +93,7 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
             model=model,
             tools=tools  # Empty list now
         )
-        
+
         try:
             result = await Runner.run(
                 agent,
@@ -101,24 +109,42 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
                 logger.warning(f"Retirement temporary error: {e}")
                 raise AgentTemporaryError(f"Temporary error: {e}")
             raise  # Re-raise non-retryable errors
-        
-        # Save the analysis to database
-        retirement_payload = {
-            'analysis': result.final_output,
-            'generated_at': datetime.utcnow().isoformat(),
-            'agent': 'retirement'
-        }
-        
-        success = db.jobs.update_retirement(job_id, retirement_payload)
-        
-        if not success:
-            logger.error(f"Failed to save retirement analysis for job {job_id}")
-        
-        return {
-            'success': success,
-            'message': 'Retirement analysis completed' if success else 'Analysis completed but failed to save',
-            'final_output': result.final_output
-        }
+
+    t_agent = time.monotonic() - t_agent_start
+    logger.info(f"[TIMING] Agent run phase: {t_agent:.2f}s | model={effective_model}")
+
+    # Save the analysis to database
+    t_db_start = time.monotonic()
+    retirement_payload = {
+        'analysis': result.final_output,
+        'generated_at': datetime.utcnow().isoformat(),
+        'agent': 'retirement'
+    }
+
+    success = db.jobs.update_retirement(job_id, retirement_payload)
+
+    if not success:
+        logger.error(f"Failed to save retirement analysis for job {job_id}")
+
+    t_db = time.monotonic() - t_db_start
+    t_total = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] run_retirement_agent TOTAL: {t_total:.2f}s "
+        f"(create={t_create:.2f}s, agent={t_agent:.2f}s, db={t_db:.2f}s) | model={effective_model}"
+    )
+
+    return {
+        'success': success,
+        'message': 'Retirement analysis completed' if success else 'Analysis completed but failed to save',
+        'final_output': result.final_output,
+        'model': effective_model,
+        'timing': {
+            'create_s': round(t_create, 2),
+            'agent_s': round(t_agent, 2),
+            'db_s': round(t_db, 2),
+            'total_s': round(t_total, 2),
+        },
+    }
 
 def lambda_handler(event, context):
     """
@@ -130,6 +156,9 @@ def lambda_handler(event, context):
         "portfolio_data": {...}  # Optional, will load from DB if not provided
     }
     """
+    t_lambda_start = time.monotonic()
+    logger.info(f"lambda_handler START | model={MODEL_ID}")
+
     # Wrap entire handler with observability context
     with observe() as observability:
         try:
@@ -162,7 +191,7 @@ def lambda_handler(event, context):
                             observability.create_event(
                                 name="Retirement Started!", status_message="OK"
                             )
-                        
+
                         # portfolio_data = job.get('request_payload', {}).get('portfolio_data', {})
                         user_id = job['clerk_user_id']
                         user = db.users.find_by_clerk_id(user_id)
@@ -215,6 +244,13 @@ def lambda_handler(event, context):
             # Run the agent
             result = asyncio.run(run_retirement_agent(job_id, portfolio_data))
 
+            t_total = time.monotonic() - t_lambda_start
+            result['timing']['lambda_total_s'] = round(t_total, 2)
+            logger.info(
+                f"[TIMING] lambda_handler TOTAL: {t_total:.2f}s | "
+                f"job={job_id} | model={MODEL_ID}"
+            )
+
             logger.info(f"Retirement completed for job {job_id}")
 
             return {
@@ -223,7 +259,8 @@ def lambda_handler(event, context):
             }
 
         except Exception as e:
-            logger.error(f"Error in retirement: {e}", exc_info=True)
+            t_total = time.monotonic() - t_lambda_start
+            logger.error(f"Lambda handler error after {t_total:.2f}s: {e}", exc_info=True)
             return {
                 'statusCode': 500,
                 'body': json.dumps({

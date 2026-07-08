@@ -1,8 +1,10 @@
 """
 Report Writer Agent - generates portfolio analysis narratives.
+Uses OpenAI models via LiteLLM (migrated from Bedrock).
 """
 
 import os
+import time
 import json
 import logging
 from typing import Dict, Any, List, Optional
@@ -10,8 +12,14 @@ from dataclasses import dataclass
 
 from agents import function_tool, RunContextWrapper
 from agents.extensions.models.litellm_model import LitellmModel
+from dotenv import load_dotenv
 
-logger = logging.getLogger()
+load_dotenv(override=True)
+
+logger = logging.getLogger(__name__)
+
+# Model configuration
+MODEL_ID = os.getenv("MODEL_ID_REPORTER", "openai/gpt-5.4-nano")
 
 
 @dataclass
@@ -185,15 +193,10 @@ async def get_market_insights(
 def create_agent(job_id: str, portfolio_data: Dict[str, Any], user_data: Dict[str, Any], db=None):
     """Create the reporter agent with tools and context."""
 
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-    logger.info(f"DEBUG: BEDROCK_REGION from env = {bedrock_region}")
-    os.environ["AWS_REGION_NAME"] = bedrock_region
-    logger.info(f"DEBUG: Set AWS_REGION_NAME to {bedrock_region}")
+    t_start = time.monotonic()
+    logger.info(f"create_agent: building task for job={job_id} | model={MODEL_ID}")
 
-    model = LitellmModel(model=f"bedrock/{model_id}")
+    model = LitellmModel(model=MODEL_ID)
 
     # Create context
     context = ReporterContext(
@@ -228,4 +231,8 @@ The report should include:
 Provide your complete analysis as the final output in clear markdown format.
 Make the report informative yet accessible to a retail investor."""
 
-    return model, tools, task, context
+    t_elapsed = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] create_agent: {t_elapsed:.2f}s | model={MODEL_ID}"
+    )
+    return model, tools, task, context, MODEL_ID

@@ -1,9 +1,11 @@
 """
 Chart Maker Agent Lambda Handler
+Uses OpenAI model via LiteLLM.
 """
 
 import os
 import json
+import time
 import asyncio
 import logging
 from typing import Dict, Any
@@ -22,7 +24,7 @@ except ImportError:
 from src import Database
 
 from templates import CHARTER_INSTRUCTIONS
-from agent import create_agent
+from agent import create_agent, MODEL_ID
 from observability import observe
 
 logger = logging.getLogger()
@@ -36,93 +38,117 @@ logger.setLevel(logging.INFO)
 )
 async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None) -> Dict[str, Any]:
     """Run the charter agent to generate visualization data."""
-    
+
+    t_start = time.monotonic()
+    logger.info(f"run_charter_agent START | job={job_id} | model={MODEL_ID}")
+
     # Create agent without tools - will output JSON
-    model, task = create_agent(job_id, portfolio_data, db)
-    
+    model, task, effective_model = create_agent(job_id, portfolio_data, db)
+    t_create = time.monotonic() - t_start
+    logger.info(f"[TIMING] Agent creation phase: {t_create:.2f}s")
+
     # Run agent - no tools, no context
+    t_agent_start = time.monotonic()
     with trace("Charter Agent"):
         agent = Agent(
             name="Chart Maker",
             instructions=CHARTER_INSTRUCTIONS,
             model=model
         )
-        
+
         result = await Runner.run(
             agent,
             input=task,
             max_turns=5  # Reduced since we expect one-shot JSON response
         )
-        
+
         # Extract and parse JSON from the output
         output = result.final_output
         logger.info(f"Charter: Agent completed, output length: {len(output) if output else 0}")
-        
-        # Log the actual output for debugging
-        if output:
-            logger.info(f"Charter: Output preview (first 1000 chars): {output[:1000]}")
+
+    t_agent = time.monotonic() - t_agent_start
+    logger.info(f"[TIMING] Agent run phase: {t_agent:.2f}s | model={effective_model}")
+
+    # Log the actual output for debugging
+    if output:
+        logger.info(f"Charter: Output preview (first 1000 chars): {output[:1000]}")
+    else:
+        logger.warning("Charter: Agent returned empty output!")
+        # Check if there were any messages
+        if hasattr(result, 'messages') and result.messages:
+            logger.info(f"Charter: Number of messages: {len(result.messages)}")
+            for i, msg in enumerate(result.messages):
+                logger.info(f"Charter: Message {i}: {str(msg)[:500]}")
+
+    # Parse the JSON output
+    charts_data = None
+    charts_saved = False
+
+    t_db_start = time.monotonic()
+    if output:
+        # Try to find JSON in the output
+        # Look for the opening and closing braces of the JSON object
+        start_idx = output.find('{')
+        end_idx = output.rfind('}')
+
+        if start_idx >= 0 and end_idx > start_idx:
+            json_str = output[start_idx:end_idx + 1]
+            logger.info(f"Charter: Extracted JSON substring, length: {len(json_str)}")
+
+            try:
+                parsed_data = json.loads(json_str)
+                charts = parsed_data.get('charts', [])
+                logger.info(f"Charter: Successfully parsed JSON, found {len(charts)} charts")
+
+                if charts:
+                    # Build the charts_payload with chart keys as top-level keys
+                    charts_data = {}
+                    for chart in charts:
+                        chart_key = chart.get('key', f"chart_{len(charts_data) + 1}")
+                        # Remove the 'key' from the chart data since it's now the dict key
+                        chart_copy = {k: v for k, v in chart.items() if k != 'key'}
+                        charts_data[chart_key] = chart_copy
+
+                    logger.info(f"Charter: Created charts_data with keys: {list(charts_data.keys())}")
+
+                    # Save to database
+                    if db and charts_data:
+                        try:
+                            success = db.jobs.update_charts(job_id, charts_data)
+                            charts_saved = bool(success)
+                            logger.info(f"Charter: Database update returned: {success}")
+                        except Exception as e:
+                            logger.error(f"Charter: Database error: {e}")
+                else:
+                    logger.warning("Charter: No charts found in parsed JSON")
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Charter: Failed to parse JSON: {e}")
+                logger.error(f"Charter: JSON string attempted: {json_str[:500]}...")
         else:
-            logger.warning("Charter: Agent returned empty output!")
-            # Check if there were any messages
-            if hasattr(result, 'messages') and result.messages:
-                logger.info(f"Charter: Number of messages: {len(result.messages)}")
-                for i, msg in enumerate(result.messages):
-                    logger.info(f"Charter: Message {i}: {str(msg)[:500]}")
-        
-        # Parse the JSON output
-        charts_data = None
-        charts_saved = False
-        
-        if output:
-            # Try to find JSON in the output
-            # Look for the opening and closing braces of the JSON object
-            start_idx = output.find('{')
-            end_idx = output.rfind('}')
-            
-            if start_idx >= 0 and end_idx > start_idx:
-                json_str = output[start_idx:end_idx + 1]
-                logger.info(f"Charter: Extracted JSON substring, length: {len(json_str)}")
-                
-                try:
-                    parsed_data = json.loads(json_str)
-                    charts = parsed_data.get('charts', [])
-                    logger.info(f"Charter: Successfully parsed JSON, found {len(charts)} charts")
-                    
-                    if charts:
-                        # Build the charts_payload with chart keys as top-level keys
-                        charts_data = {}
-                        for chart in charts:
-                            chart_key = chart.get('key', f"chart_{len(charts_data) + 1}")
-                            # Remove the 'key' from the chart data since it's now the dict key
-                            chart_copy = {k: v for k, v in chart.items() if k != 'key'}
-                            charts_data[chart_key] = chart_copy
-                        
-                        logger.info(f"Charter: Created charts_data with keys: {list(charts_data.keys())}")
-                        
-                        # Save to database
-                        if db and charts_data:
-                            try:
-                                success = db.jobs.update_charts(job_id, charts_data)
-                                charts_saved = bool(success)
-                                logger.info(f"Charter: Database update returned: {success}")
-                            except Exception as e:
-                                logger.error(f"Charter: Database error: {e}")
-                    else:
-                        logger.warning("Charter: No charts found in parsed JSON")
-                        
-                except json.JSONDecodeError as e:
-                    logger.error(f"Charter: Failed to parse JSON: {e}")
-                    logger.error(f"Charter: JSON string attempted: {json_str[:500]}...")
-            else:
-                logger.error(f"Charter: No JSON structure found in output")
-                logger.error(f"Charter: Output preview: {output[:500]}...")
-        
-        return {
-            'success': charts_saved,
-            'message': f'Generated {len(charts_data) if charts_data else 0} charts' if charts_saved else 'Failed to generate charts',
-            'charts_generated': len(charts_data) if charts_data else 0,
-            'chart_keys': list(charts_data.keys()) if charts_data else []
-        }
+            logger.error(f"Charter: No JSON structure found in output")
+            logger.error(f"Charter: Output preview: {output[:500]}...")
+
+    t_db = time.monotonic() - t_db_start
+    t_total = time.monotonic() - t_start
+    logger.info(
+        f"[TIMING] run_charter_agent TOTAL: {t_total:.2f}s "
+        f"(create={t_create:.2f}s, agent={t_agent:.2f}s, db={t_db:.2f}s) | model={effective_model}"
+    )
+
+    return {
+        'success': charts_saved,
+        'message': f'Generated {len(charts_data) if charts_data else 0} charts' if charts_saved else 'Failed to generate charts',
+        'charts_generated': len(charts_data) if charts_data else 0,
+        'chart_keys': list(charts_data.keys()) if charts_data else [],
+        'model': effective_model,
+        'timing': {
+            'create_s': round(t_create, 2),
+            'agent_s': round(t_agent, 2),
+            'db_s': round(t_db, 2),
+            'total_s': round(t_total, 2),
+        },
+    }
 
 def lambda_handler(event, context):
     """
@@ -134,6 +160,9 @@ def lambda_handler(event, context):
         "portfolio_data": {...}
     }
     """
+    t_lambda_start = time.monotonic()
+    logger.info(f"lambda_handler START | model={MODEL_ID}")
+
     # Wrap entire handler with observability context
     with observe():
         try:
@@ -211,6 +240,13 @@ def lambda_handler(event, context):
             # Run the agent
             result = asyncio.run(run_charter_agent(job_id, portfolio_data, db))
 
+            t_total = time.monotonic() - t_lambda_start
+            result['timing']['lambda_total_s'] = round(t_total, 2)
+            logger.info(
+                f"[TIMING] lambda_handler TOTAL: {t_total:.2f}s | "
+                f"job={job_id} | model={MODEL_ID}"
+            )
+
             logger.info(f"Charter completed for job {job_id}: {result}")
 
             return {
@@ -219,7 +255,8 @@ def lambda_handler(event, context):
             }
 
         except Exception as e:
-            logger.error(f"Error in charter: {e}", exc_info=True)
+            t_total = time.monotonic() - t_lambda_start
+            logger.error(f"Lambda handler error after {t_total:.2f}s: {e}", exc_info=True)
             return {
                 'statusCode': 500,
                 'body': json.dumps({

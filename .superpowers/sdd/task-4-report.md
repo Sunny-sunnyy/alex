@@ -107,3 +107,31 @@ README mới đã document rõ mismatch này thay vì lặp lại hướng dẫn
 ## Commit
 
 Commit được tạo sau khi stage đúng 2 file thuộc task này.
+
+## Fix bổ sung cho review findings
+
+- Đã thêm `VECTOR_BUCKET` vào phần `Environment Variables tổng hợp` để README khớp với env Terraform thực tế đang inject vào planner và các agent còn lại.
+- Đã dời checklist/resource summary xuống cuối file, ngay sau `Tóm tắt`, để thứ tự section khớp hơn với prompt/spec của README Terraform.
+- Giữ nguyên toàn bộ phân biệt current state vs migration notes; không đổi nội dung Bedrock/OpenAI ngoài phần wiring/ordering cần thiết.
+
+## Validation chạy lại
+
+Đã rerun đúng bộ lệnh focus sau khi chỉnh README:
+
+```bash
+wc -l terraform/6_agents/README.md
+rg -n "^## " terraform/6_agents/README.md
+rg -n "IAM Roles & Policies|Environment Variables tổng hợp|Cách chuyển sang OpenAI models|BEDROCK_MODEL_ID|OPENAI_API_KEY|VECTOR_BUCKET" terraform/6_agents/README.md
+```
+
+Kết quả:
+
+- `terraform/6_agents/README.md` tồn tại
+- file có 332 dòng
+- các section bắt buộc vẫn còn
+- `VECTOR_BUCKET` xuất hiện trong env summary
+- checklist/resource summary hiện nằm ở cuối file
+
+## Trạng thái hiện tại
+
+Pending bước commit sau khi stage đúng phạm vi thay đổi của task này.

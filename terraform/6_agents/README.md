@@ -124,6 +124,7 @@ Terraform inject env theo từng Lambda như sau:
 | `AURORA_CLUSTER_ARN` | Yes | Yes | Yes | Yes | Yes | Aurora cluster ARN từ Part 5. |
 | `AURORA_SECRET_ARN` | Yes | Yes | Yes | Yes | Yes | Secrets Manager secret ARN từ Part 5. |
 | `DATABASE_NAME` | Yes | Yes | Yes | Yes | Yes | Hardcode là `alex`. |
+| `VECTOR_BUCKET` | Yes | Yes | Yes | Yes | Yes | S3 Vectors bucket name từ Part 3, dùng cho query/search data layer. |
 | `BEDROCK_MODEL_ID` | Yes | Yes | Yes | Yes | Yes | Model ID hiện tại cho LiteLLM Bedrock. |
 | `BEDROCK_REGION` | Yes | Yes | Yes | Yes | Yes | Region Bedrock hiện tại. |
 | `DEFAULT_AWS_REGION` | Yes | Yes | Yes | Yes | Yes | Region deploy Lambda và boto3 mặc định. |
@@ -269,14 +270,6 @@ cd backend
 uv run watch_agents.py --region us-east-1 --lookback 5 --interval 2
 ```
 
-Checklist sau khi apply:
-
-- queue `alex-analysis-jobs` và `alex-analysis-jobs-dlq` tồn tại
-- bucket `alex-lambda-packages-{account_id}` tồn tại
-- cả 5 Lambda `alex-*` ở trạng thái Active
-- planner có SQS trigger attached
-- log groups `/aws/lambda/alex-*` đã có
-
 ## Cách chuyển sang OpenAI models
 
 Current state phải giữ nguyên khi document:
@@ -329,3 +322,11 @@ Nếu bạn cần đọc theo đúng vai trò:
 - đọc file này để hiểu resource inventory, IAM, env injection, outputs và dependency với các part trước
 - đọc 5 backend READMEs để hiểu code của từng agent
 - khi migrate sang OpenAI models, hãy đổi hạ tầng và code cùng nhau, nhưng có thể tạm giữ naming Bedrock để giảm churn ở giai đoạn đầu
+
+## Checklist sau khi apply
+
+- queue `alex-analysis-jobs` và `alex-analysis-jobs-dlq` tồn tại
+- bucket `alex-lambda-packages-{account_id}` tồn tại
+- cả 5 Lambda `alex-*` ở trạng thái Active
+- planner có SQS trigger attached
+- log groups `/aws/lambda/alex-*` đã có

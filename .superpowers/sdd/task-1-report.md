@@ -144,7 +144,7 @@ Kết luận:
 
 Commit đã tạo:
 
-- sẽ cập nhật sau khi commit xong
+- `d1b5448 docs: add part 6 tagger and charter readmes`
 
 ## Concerns
 

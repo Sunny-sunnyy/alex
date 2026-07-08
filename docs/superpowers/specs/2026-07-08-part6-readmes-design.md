@@ -103,11 +103,11 @@ README sẽ khuyến nghị model theo nhiệm vụ như sau:
 
 | Folder | Model khuyến nghị | Lý do |
 |---|---|---|
-| `backend/tagger` | `openai/gpt-5.4-mini` | Structured classification, scope hẹp, cần ổn định |
-| `backend/reporter` | `openai/gpt-5.4-nano` | Có tool usage và viết report, ưu tiên cost trước; có thể nâng lên `mini` nếu chất lượng chưa đủ |
-| `backend/charter` | `openai/gpt-5.4-mini` | Tạo JSON chart payload có cấu trúc, cần output ổn định |
-| `backend/retirement` | `openai/gpt-5.4-mini` | Reasoning và khuyến nghị tài chính phức tạp hơn |
-| `backend/planner` | `openai/gpt-5.4-mini` | Orchestration quan trọng, cần quyết định ổn định hơn `nano` |
+| `backend/tagger` | `openai/gpt-5.4-nano` | Structured classification, scope hẹp, ưu tiên tốc độ và chi phí thấp |
+| `backend/reporter` | `openai/gpt-5.4-nano` | Có tool usage và viết report, ưu tiên cost và latency; README sẽ ghi rõ có thể nâng lên `mini` nếu chất lượng chưa đạt |
+| `backend/charter` | `openai/gpt-5.4-nano` | Sinh chart payload có cấu trúc, ưu tiên phản hồi nhanh và rẻ trước |
+| `backend/retirement` | `openai/gpt-5.4-nano` | Dù có reasoning, user ưu tiên tốc độ và chi phí; README sẽ ghi đây là lựa chọn tối ưu vận hành trước |
+| `backend/planner` | `openai/gpt-5.4-mini` | Orchestration là khâu quan trọng nhất, cần quyết định ổn định hơn `nano` |
 
 `terraform/6_agents/README.md` sẽ tổng hợp mapping này ở góc nhìn hạ tầng/env.
 

@@ -341,7 +341,7 @@ export default function Dashboard() {
         }
       };
 
-      const response = await fetch(`${API_URL}/api/user`, {
+      let response = await fetch(`${API_URL}/api/user`, {
         method: "PUT",
         headers: {
           "Authorization": `Bearer ${token}`,
@@ -349,6 +349,21 @@ export default function Dashboard() {
         },
         body: JSON.stringify(updateData),
       });
+
+      // Retry once with fresh token on 403 (Clerk handshake may still be settling)
+      if (response.status === 403) {
+        const freshToken = await getToken({ skipCache: true });
+        if (freshToken && freshToken !== token) {
+          response = await fetch(`${API_URL}/api/user`, {
+            method: "PUT",
+            headers: {
+              "Authorization": `Bearer ${freshToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(updateData),
+          });
+        }
+      }
 
       if (!response.ok) {
         throw new Error(`Failed to save settings: ${response.status}`);

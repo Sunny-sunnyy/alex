@@ -368,6 +368,48 @@ Hạ tầng deploy frontend này nằm ở `terraform/7_frontend`.
 - `lib/api.ts` tồn tại như typed client, nhưng nhiều page vẫn `fetch()` trực tiếp thay vì dùng đồng nhất một abstraction.
 - `pages/analysis.tsx` phải suy đoán chart type từ payload động của charter agent, cho thấy contract chart payload hiện khá linh hoạt hơn là schema cứng.
 
+## Troubleshooting — các lỗi đã gặp và cách fix
+
+### Lỗi 1: `Bus error (core dumped)` khi `npm run dev` / `npm run build` trên WSL2
+
+**Triệu chứng:** Chạy `npm run dev` hoặc `npm run build` trong thư mục `frontend/` crash ngay lập tức với:
+
+```text
+Bus error (core dumped)
+```
+
+**Root cause:** Native binary `@next/swc-linux-x64-gnu` (Next.js SWC compiler) không tương thích với WSL2 trên máy này. Load trực tiếp binary qua `node -e "require('...')"` cũng crash với exit code 135.
+
+**Cách fix:** Dùng WebAssembly fallback thay vì native binary. Đã tích hợp vào `scripts/run_local.py` và `scripts/deploy.py`:
+
+```bash
+NEXT_TEST_WASM=1
+NEXT_TEST_WASM_DIR=$PWD/node_modules/@next/swc-wasm-nodejs
+```
+
+Hai script này tự động set env vars và validate `wasm.js` tồn tại trước khi chạy. Nếu chạy `npm run dev` thủ công, phải set thủ công 2 biến trên.
+
+**Package cần cài:** `@next/swc-wasm-nodejs@15.5.3` (đã có trong `package.json`)
+
+**Lưu ý:** Nếu cài lại `node_modules`, phải dùng `npm install --legacy-peer-deps` do conflict version giữa `@clerk/nextjs` và `react`.
+
+### Lỗi 2: Save settings lần đầu bị 403, lần sau OK
+
+**Triệu chứng:** Sau khi sign-in, vào Dashboard bấm "Save Settings" lần đầu → `Failed to save settings: 403`. Bấm lại lần nữa → lưu thành công.
+
+**Root cause:** Clerk `__clerk_handshake` mất ~50 giây để đồng bộ session giữa frontend và Clerk API. `getToken()` gọi trong thời gian này có thể trả về JWT chưa thực sự hợp lệ → backend `ClerkHTTPBearer` reject với 403.
+
+**Cách fix:** Trong `pages/dashboard.tsx` `handleSaveSettings()`, khi gặp 403 thì gọi `getToken({ skipCache: true })` để lấy fresh token và retry request một lần:
+
+```typescript
+if (response.status === 403) {
+  const freshToken = await getToken({ skipCache: true });
+  if (freshToken && freshToken !== token) {
+    response = await fetch(...);  // retry với fresh token
+  }
+}
+```
+
 ## Cách sử dụng nhanh
 
 ```bash

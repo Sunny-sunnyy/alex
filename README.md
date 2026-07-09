@@ -1979,3 +1979,446 @@ Mỗi ngày mới nên append theo form này:
 - Đã ghi nhận hai tài liệu reference mới:
   - `backend/database/README.md`
   - `terraform/5_database/README.md`
+
+## Week 4 / Day 3
+
+- Đã append nhật ký cho:
+  - `guides/7_frontend.md`
+  - `frontend/README.md`
+  - `backend/api/README.md`
+  - `terraform/7_frontend/README.md`
+  - `scripts/deploy.py`
+- Đã ghi rõ Part 7 hiện tại là static Next.js frontend trên S3 + CloudFront, đi kèm FastAPI backend trên Lambda + API Gateway HTTP API.
+- Đã ghi lại đường đi production thực tế: frontend gọi `/api/*` qua CloudFront, còn auth được validate trong Lambda bằng Clerk JWKS chứ không phải ở API Gateway layer.
+- Đã ghi nhận các điểm implementation cần nhớ:
+  - Terraform Part 7 dùng local remote state từ Part 5 và Part 6.
+  - Frontend production dựa vào static export.
+  - `scripts/deploy.py` có workaround WSL2 cho Next SWC bằng WASM fallback.
+
+---
+
+# Week 4 / Day 3 - Frontend & API
+
+## Phạm vi Day 3
+
+Day này tập trung vào:
+
+- `guides/7_frontend.md`
+- `frontend/`
+- `backend/api/`
+- `terraform/7_frontend/`
+- `scripts/deploy.py`
+
+Đây là ngày Alex chuyển từ backend infrastructure + agent orchestra sang trải nghiệm SaaS hoàn chỉnh cho người dùng cuối.
+
+Mục tiêu kỹ thuật của Day 3:
+
+1. nối auth Clerk vào frontend và backend;
+2. chạy được frontend + backend local để kiểm tra flow;
+3. deploy backend API của Guide 7 lên Lambda;
+4. deploy frontend static lên S3 + CloudFront;
+5. nối UI với Part 5 database và Part 6 agents qua `/api/*`.
+
+## Những file đã được dùng để lấy ngữ cảnh
+
+Các file quan trọng cần đọc trong Day 3:
+
+- `guides/7_frontend.md`
+- `frontend/README.md`
+- `backend/api/README.md`
+- `terraform/7_frontend/README.md`
+- `terraform/7_frontend/main.tf`
+- `terraform/7_frontend/variables.tf`
+- `terraform/7_frontend/outputs.tf`
+- `scripts/deploy.py`
+
+Vai trò của từng nhóm file:
+
+- `guides/7_frontend.md`: mô tả flow học của Part 7 theo course.
+- `frontend/README.md`: source of truth cho app Next.js hiện tại, các page, config, event flow, và lỗi đã gặp.
+- `backend/api/README.md`: source of truth cho FastAPI backend, Clerk auth, CRUD routes, và trigger analysis.
+- `terraform/7_frontend/README.md`: mô tả lớp infra production của Part 7.
+- `terraform/7_frontend/main.tf`: source of truth thật cho resource graph AWS của Guide 7.
+- `scripts/deploy.py`: source of truth cho đường deploy thực tế end-to-end của Part 7.
+
+## Kiến trúc thực tế của Part 7 trong repo hiện tại
+
+Guide 7 trong repo hiện tại được hiểu như sau:
+
+1. `frontend/` là Next.js app dùng **Pages Router**.
+2. App được build bằng **static export** (`output = "export"`).
+3. Static files được sync lên S3 bucket frontend.
+4. CloudFront phục vụ frontend và route `/api/*` sang API Gateway.
+5. `backend/api` chạy trên **AWS Lambda** qua `Mangum`.
+6. API Lambda đọc/ghi Aurora qua Data API và gửi job sang SQS Part 6.
+7. Part 7 không tự tạo DB hay agents; nó tiêu thụ remote state của Part 5 và Part 6.
+
+Sơ đồ production thực tế:
+
+```text
+Browser
+  -> CloudFront
+     -> S3 website origin (static frontend)
+     -> API Gateway HTTP API (/api/*)
+        -> Lambda alex-api
+           -> Aurora Data API
+           -> SQS alex-analysis-jobs
+```
+
+## Part 7 - Frontend
+
+### Mục tiêu
+
+Tạo lớp giao diện mà người dùng có thể:
+
+- sign in bằng Clerk;
+- quản lý accounts và positions;
+- populate test data;
+- trigger AI analysis;
+- xem report, charts, retirement output từ Part 6.
+
+### Các thành phần chính trong `frontend/`
+
+Các page quan trọng:
+
+- `pages/index.tsx`: landing page + sign in/sign up entry
+- `pages/dashboard.tsx`: user profile, retirement targets, portfolio summary
+- `pages/accounts.tsx`: list accounts, reset, populate test data
+- `pages/accounts/[id].tsx`: CRUD positions trong từng account
+- `pages/advisor-team.tsx`: trigger analysis và theo dõi progress
+- `pages/analysis.tsx`: render report, charts, retirement result
+
+Các lớp hỗ trợ quan trọng:
+
+- `lib/config.ts`: chọn API base URL local vs production
+- `lib/api.ts`: typed client cho backend
+- `lib/events.ts`: event bus đơn giản cho analysis lifecycle
+- `components/Layout.tsx`: shell bảo vệ bằng Clerk `Protect`
+- `components/Toast.tsx`: notification system
+
+### Điều quan trọng cần nhớ
+
+Production không cần hard-code API Gateway URL ở frontend.
+
+Thay vào đó:
+
+- local mode gọi `http://localhost:8000`
+- production mode gọi tương đối `/api/*`
+- CloudFront sẽ route `/api/*` sang API Gateway origin
+
+Đây là điểm rất quan trọng để hiểu đúng vì sao frontend static vẫn gọi được backend động.
+
+## Part 7 - Backend API
+
+### Mục tiêu
+
+`backend/api` là lớp HTTP bridge giữa UI với Aurora và Agent Orchestra.
+
+Nó chịu trách nhiệm:
+
+- validate Clerk JWT;
+- tạo/lấy user profile;
+- CRUD accounts và positions;
+- tạo analysis job;
+- gửi message sang SQS để planner xử lý async;
+- trả job status về cho UI poll.
+
+### Các route chính
+
+- `GET /health`
+- `GET /api/user`
+- `PUT /api/user`
+- `GET /api/accounts`
+- `POST /api/accounts`
+- `PUT /api/accounts/{account_id}`
+- `DELETE /api/accounts/{account_id}`
+- `GET /api/accounts/{account_id}/positions`
+- `POST /api/positions`
+- `PUT /api/positions/{position_id}`
+- `DELETE /api/positions/{position_id}`
+- `GET /api/instruments`
+- `POST /api/analyze`
+- `GET /api/jobs/{job_id}`
+- `GET /api/jobs`
+- `DELETE /api/reset-accounts`
+- `POST /api/populate-test-data`
+
+### Đặc điểm implementation quan trọng
+
+1. Auth không nằm ở API Gateway.
+2. Auth được validate trong FastAPI/Lambda bằng `CLERK_JWKS_URL`.
+3. API có thể chạy local và production với cùng app logic.
+4. `/api/analyze` tạo job trong DB rồi đẩy `job_id` sang queue Part 6.
+5. API tự tạo instrument tối giản nếu user thêm symbol mới chưa có metadata đầy đủ.
+
+## Part 7 - Hạ tầng Terraform
+
+### Mục tiêu
+
+`terraform/7_frontend` tạo lớp production hosting cho frontend và API:
+
+- S3 bucket website cho frontend
+- CloudFront distribution
+- IAM role + policies cho API Lambda
+- Lambda `alex-api`
+- API Gateway HTTP API
+
+### Các resource chính
+
+1. `aws_s3_bucket.frontend`
+2. `aws_s3_bucket_website_configuration.frontend`
+3. `aws_s3_bucket_policy.frontend`
+4. `aws_iam_role.api_lambda_role`
+5. `aws_iam_role_policy.api_lambda_aurora`
+6. `aws_iam_role_policy.api_lambda_sqs`
+7. `aws_iam_role_policy.api_lambda_invoke`
+8. `aws_lambda_function.api`
+9. `aws_apigatewayv2_api.main`
+10. `aws_apigatewayv2_route.api_any`
+11. `aws_apigatewayv2_stage.default`
+12. `aws_cloudfront_distribution.main`
+
+### Inputs quan trọng của Part 7
+
+`terraform.tfvars` tối thiểu cần:
+
+```hcl
+aws_region     = "..."
+clerk_jwks_url = "https://.../.well-known/jwks.json"
+clerk_issuer   = "https://..."
+```
+
+### Các dependency bắt buộc
+
+Part 7 chỉ hoạt động khi:
+
+1. `terraform/5_database/terraform.tfstate` đã tồn tại và hợp lệ
+2. `terraform/6_agents/terraform.tfstate` đã tồn tại và hợp lệ
+3. `backend/api/api_lambda.zip` đã được build
+4. frontend đã build ra static export nếu deploy manual
+
+### Outputs quan trọng cần lưu
+
+Sau khi `terraform apply`, cần lưu:
+
+- `cloudfront_url`
+- `api_gateway_url`
+- `s3_bucket_name`
+- `lambda_function_name`
+
+## Flow local của Guide 7
+
+### Frontend env
+
+`frontend/.env.local` cần có ít nhất:
+
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+- `CLERK_SECRET_KEY`
+- `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL`
+- `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL`
+- `NEXT_PUBLIC_API_URL=http://localhost:8000`
+
+### Root `.env`
+
+Root `.env` cần có thêm ít nhất:
+
+- `CLERK_JWKS_URL`
+- các giá trị Part 5 (`AURORA_CLUSTER_ARN`, `AURORA_SECRET_ARN`, ...)
+- các giá trị Part 6 (`SQS_QUEUE_URL` về sau được Terraform inject vào Lambda production, nhưng local flow vẫn cần hiểu queue path)
+
+### Lệnh local quan trọng
+
+```bash
+cd frontend
+npm install
+```
+
+```bash
+cd scripts
+uv run run_local.py
+```
+
+Kết quả kỳ vọng:
+
+- frontend chạy ở `http://localhost:3000`
+- backend docs ở `http://localhost:8000/docs`
+
+## Flow deploy thực tế của repo
+
+`scripts/deploy.py` là đường deploy production thực dụng của Part 7.
+
+Script này làm các bước:
+
+1. package `backend/api` bằng Docker
+2. deploy Terraform Part 7 để lấy output hạ tầng
+3. build frontend production
+4. sync `frontend/out/` lên S3
+5. invalidate CloudFront
+
+### Điều quan trọng từ `scripts/deploy.py`
+
+Script hiện tại có một workaround rất đáng nhớ cho môi trường WSL2:
+
+- set `NEXT_TEST_WASM=1`
+- set `NEXT_TEST_WASM_DIR=.../node_modules/@next/swc-wasm-nodejs`
+
+Lý do: native `next-swc` có thể crash với `Bus error (core dumped)` trên WSL2, nên build phải rơi về WASM fallback.
+
+## Những gì đã làm trong Day 3
+
+1. đã đọc lại Guide 7 và các README liên quan để nắm đúng repo state;
+2. đã xác nhận source of truth của Part 7 là code/README hiện tại, không phải mô tả cũ nếu có drift;
+3. đã chốt rằng production path của frontend là:
+   - static export
+   - S3 website origin
+   - CloudFront split origin
+   - API Gateway HTTP API
+   - Lambda `alex-api`
+4. đã chốt rằng auth path thực tế là Clerk JWT validate ở Lambda, không phải API Gateway authorizer;
+5. đã chốt rằng Part 7 phụ thuộc trực tiếp vào local Terraform state của Part 5 và Part 6;
+6. đã ghi nhận `scripts/deploy.py` là script deploy canonical của Guide 7 trong repo này.
+
+## Hạ tầng / code / config quan trọng của Day 3
+
+### File code / infra quan trọng
+
+- `frontend/README.md`
+- `backend/api/README.md`
+- `terraform/7_frontend/README.md`
+- `terraform/7_frontend/main.tf`
+- `terraform/7_frontend/variables.tf`
+- `terraform/7_frontend/outputs.tf`
+- `scripts/deploy.py`
+
+### Giá trị output / state cần lưu cho ngày sau
+
+- CloudFront domain của frontend production
+- API Gateway URL
+- tên bucket S3 frontend
+- tên Lambda `alex-api`
+- Clerk JWKS URL và issuer đã dùng ở Part 7
+
+## Lỗi và bẫy quan trọng của Part 7
+
+### Lỗi 1: `Bus error (core dumped)` khi build frontend trên WSL2
+
+- triệu chứng:
+  - `npm run dev` hoặc `npm run build` crash ngay bằng `Bus error (core dumped)`
+- root cause:
+  - native binary `@next/swc-linux-x64-gnu` không tương thích với môi trường WSL2 hiện tại
+- cách fix:
+  - dùng WASM fallback như `scripts/run_local.py` và `scripts/deploy.py` đang làm
+  - bảo đảm package `@next/swc-wasm-nodejs` tồn tại
+
+### Lỗi 2: save settings lần đầu bị 403
+
+- triệu chứng:
+  - user vừa sign-in xong, bấm save settings lần đầu có thể fail 403; lần sau lại thành công
+- root cause:
+  - Clerk handshake/session sync chưa hoàn tất, token lấy sớm có thể chưa hợp lệ hoàn toàn
+- cách fix:
+  - retry với `getToken({ skipCache: true })`
+  - đây là behavior đã được ghi lại trong `frontend/README.md`
+
+### Bẫy 1: tưởng API Gateway tự validate JWT
+
+Trong repo hiện tại điều đó không đúng.
+
+JWT authorizer ở API Gateway **không được dùng**.
+
+Validation được làm trong `backend/api` bằng Clerk JWKS.
+
+### Bẫy 2: quên remote state của Part 5 và Part 6
+
+Nếu `terraform/7_frontend` không đọc được:
+
+- `../5_database/terraform.tfstate`
+- `../6_agents/terraform.tfstate`
+
+thì Part 7 không thể lấy:
+
+- ARN Aurora
+- secret ARN
+- database name
+- queue URL/ARN
+
+### Bẫy 3: frontend là static export, không phải Next server runtime
+
+Vì vậy production behavior phải được hiểu theo hướng:
+
+- UI ở S3/CloudFront
+- backend động ở Lambda riêng
+- không có Next SSR server cho app này
+
+## Lệnh quan trọng
+
+### Build API Lambda
+
+```bash
+cd backend/api
+uv run package_docker.py
+```
+
+### Chạy local frontend + backend
+
+```bash
+cd scripts
+uv run run_local.py
+```
+
+### Deploy production
+
+```bash
+cd scripts
+uv run deploy.py
+```
+
+### Deploy Terraform Part 7 thủ công
+
+```bash
+cd terraform/7_frontend
+terraform init
+terraform plan
+terraform apply
+terraform output
+```
+
+### Sync frontend manual nếu không dùng script deploy
+
+```bash
+cd frontend
+npm run build
+aws s3 sync out/ s3://<frontend-bucket> --delete
+```
+
+## Trạng thái kết thúc Day 3
+
+Sau Day 3 của Week 4:
+
+1. đã có lớp UI hoàn chỉnh cho Alex;
+2. đã có API backend riêng cho frontend;
+3. đã có đường deploy production rõ ràng cho frontend + API;
+4. đã nối được Part 7 với Part 5 database và Part 6 agents;
+5. đã hiểu các bẫy thực tế của repo hiện tại như WSL2 SWC crash, Clerk handshake delay, và dependency vào local Terraform state.
+
+## Handoff sau Guide 7
+
+Sau khi hoàn thành `guides/7_frontend.md`, cần nhớ:
+
+1. mọi thay đổi frontend production phải xét đồng thời `frontend/`, `backend/api/`, và `terraform/7_frontend/`;
+2. nếu deploy fail, phải phân biệt rõ fail ở:
+   - build frontend
+   - package Lambda
+   - Terraform Part 7
+   - S3 sync / CloudFront invalidation
+   - Clerk auth
+3. khi debug request UI -> API, luôn kiểm tra:
+   - browser Network tab
+   - `/aws/lambda/alex-api`
+   - job record trong Aurora
+   - queue path sang Part 6
+4. nếu tiếp tục sang enterprise hardening, Part 8 sẽ chủ yếu là:
+   - security
+   - throttling/monitoring
+   - observability
+   - guardrails

@@ -10,6 +10,7 @@ import subprocess
 import signal
 import time
 from pathlib import Path
+from collections import deque
 
 # On Windows, npm/node are .cmd files and need shell=True to be found
 IS_WINDOWS = sys.platform == "win32"
@@ -97,11 +98,12 @@ def check_env_files():
 def start_backend():
     """Start the FastAPI backend"""
     backend_dir = Path(__file__).parent.parent / "backend" / "api"
+    backend_workspace_dir = backend_dir.parent
 
     print("\n🚀 Starting FastAPI backend...")
 
-    # Check if dependencies are installed
-    if not (backend_dir / ".venv").exists() and not (backend_dir / "uv.lock").exists():
+    # Check if the backend workspace already has a uv environment.
+    if not (backend_dir / ".venv").exists() and not (backend_workspace_dir / ".venv").exists():
         print("  Installing backend dependencies...")
         subprocess.run(["uv", "sync"], cwd=backend_dir, check=True)
 
@@ -119,6 +121,14 @@ def start_backend():
     # Wait for backend to start
     print("  Waiting for backend to start...")
     for _ in range(30):  # 30 second timeout
+        if proc.poll() is not None:
+            print(f"  ❌ Backend exited early with code {proc.returncode}")
+            stderr_output = proc.stderr.read().strip()
+            if stderr_output:
+                print("  Backend stderr:")
+                for line in stderr_output.splitlines()[-20:]:
+                    print(f"    {line}")
+            cleanup()
         try:
             import httpx
             response = httpx.get("http://localhost:8000/health")
@@ -135,6 +145,19 @@ def start_backend():
 def start_frontend():
     """Start the NextJS frontend"""
     frontend_dir = Path(__file__).parent.parent / "frontend"
+    frontend_env = os.environ.copy()
+    frontend_env["NEXT_TEST_WASM"] = "1"
+    frontend_env["NEXT_TEST_WASM_DIR"] = str(frontend_dir / "node_modules" / "@next" / "swc-wasm-nodejs")
+
+    # Next.js downloads the wasm SWC package into this cache dir when native SWC crashes.
+    next_swc_cache = Path.home() / ".cache" / "next-swc"
+    next_swc_cache.mkdir(parents=True, exist_ok=True)
+
+    wasm_dir = Path(frontend_env["NEXT_TEST_WASM_DIR"])
+    if not (wasm_dir / "wasm.js").exists():
+        print("  ❌ Missing wasm SWC fallback package")
+        print("  Run: cd frontend && npm install @next/swc-wasm-nodejs@15.5.3")
+        cleanup()
 
     print("\n🚀 Starting NextJS frontend...")
 
@@ -151,7 +174,8 @@ def start_frontend():
         stderr=subprocess.STDOUT,  # Combine stderr with stdout
         text=True,
         bufsize=1,
-        shell=IS_WINDOWS
+        shell=IS_WINDOWS,
+        env=frontend_env,
     )
     processes.append(proc)
 
@@ -162,10 +186,13 @@ def start_frontend():
 
     # Read frontend output in a background thread (select.select doesn't work on Windows pipes)
     started_flag = {"started": False}
+    recent_output = deque(maxlen=20)
 
     def read_output():
         for line in proc.stdout:
-            print(f"    Frontend: {line.strip()}")
+            stripped = line.strip()
+            recent_output.append(stripped)
+            print(f"    Frontend: {stripped}")
             if "ready" in line.lower() or "compiled" in line.lower() or "started server" in line.lower():
                 started_flag["started"] = True
 
@@ -173,17 +200,24 @@ def start_frontend():
     reader.start()
 
     for i in range(30):  # 30 second timeout
+        if proc.poll() is not None:
+            print(f"  ❌ Frontend exited early with code {proc.returncode}")
+            if recent_output:
+                print("  Frontend output before exit:")
+                for line in recent_output:
+                    print(f"    {line}")
+            cleanup()
+
         if started_flag["started"] or i > 5:  # Start checking after 5 seconds
             try:
                 response = httpx.get("http://localhost:3000", timeout=1)
-                print("  ✅ Frontend running at http://localhost:3000")
-                return proc
+                if response.status_code < 500:
+                    print("  ✅ Frontend running at http://localhost:3000")
+                    return proc
             except httpx.ConnectError:
                 pass  # Server not ready yet
-            except:
-                # Any other response means server is up
-                print("  ✅ Frontend running at http://localhost:3000")
-                return proc
+            except httpx.HTTPError:
+                pass
 
         time.sleep(1)
 

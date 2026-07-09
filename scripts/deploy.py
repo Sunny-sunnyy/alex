@@ -159,6 +159,16 @@ def build_frontend(api_url=None):
     # Set NODE_ENV to production to ensure .env.production is used
     build_env = os.environ.copy()
     build_env["NODE_ENV"] = "production"
+    build_env["NEXT_TEST_WASM"] = "1"
+    build_env["NEXT_TEST_WASM_DIR"] = str(frontend_dir / "node_modules" / "@next" / "swc-wasm-nodejs")
+
+    # Native next-swc crashes on this WSL2 setup; allow Next to fetch/use the wasm fallback.
+    next_swc_cache = Path.home() / ".cache" / "next-swc"
+    next_swc_cache.mkdir(parents=True, exist_ok=True)
+    if not Path(build_env["NEXT_TEST_WASM_DIR"]).joinpath("wasm.js").exists():
+        print("  ❌ Missing wasm SWC fallback package")
+        print("  Run: cd frontend && npm install @next/swc-wasm-nodejs@15.5.3")
+        sys.exit(1)
     run_command("npm run build" if IS_WINDOWS else ["npm", "run", "build"], cwd=frontend_dir, env=build_env)
 
     # Verify the build

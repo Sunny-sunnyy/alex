@@ -29,7 +29,7 @@ locals {
 }
 
 # ========================================
-# Bedrock & AI Model Usage Dashboard
+# OpenAI Agent & AI Usage Dashboard
 # ========================================
 
 resource "aws_cloudwatch_dashboard" "ai_model_usage" {
@@ -37,74 +37,69 @@ resource "aws_cloudwatch_dashboard" "ai_model_usage" {
 
   dashboard_body = jsonencode({
     widgets = [
-      # Bedrock Model Invocations
+      # Lambda duration with the current OpenAI model configuration
       {
         type   = "metric"
         width  = 12
         height = 6
         properties = {
           metrics = [
-            ["AWS/Bedrock", "Invocations", "ModelId", var.bedrock_model_id, { stat = "Sum", label = "Model Invocations", id = "m1", color = "#1f77b4" }],
-            [".", "InvocationClientErrors", ".", ".", { stat = "Sum", label = "Client Errors", id = "m2", color = "#d62728" }],
-            [".", "InvocationServerErrors", ".", ".", { stat = "Sum", label = "Server Errors", id = "m3", color = "#ff7f0e" }]
+            ["AWS/Lambda", "Duration", "FunctionName", "alex-planner", { stat = "Average", label = "Planner · gpt-5.4-mini", id = "p1", color = "#1f77b4" }],
+            [".", ".", ".", "alex-reporter", { stat = "Average", label = "Reporter · gpt-5.4-mini", id = "r1", color = "#2ca02c" }],
+            [".", ".", ".", "alex-charter", { stat = "Average", label = "Charter · gpt-4.1-nano", id = "c1", color = "#ff7f0e" }],
+            [".", ".", ".", "alex-retirement", { stat = "Average", label = "Retirement · gpt-5.4-nano", id = "rt1", color = "#d62728" }],
+            [".", ".", ".", "alex-tagger", { stat = "Average", label = "Tagger · gpt-5.4-nano", id = "t1", color = "#9467bd" }]
           ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.bedrock_region
-          title   = "Bedrock Model Invocations (${var.bedrock_model_id})"
-          period  = 300
-          stat    = "Sum"
+          view   = "timeSeries"
+          region = var.aws_region
+          title  = "OpenAI Agent Latency (Current Model Configuration)"
+          period = 300
+          stat   = "Average"
           yAxis = {
             left = {
-              label     = "Count"
+              label     = "Duration (ms)"
               showUnits = false
             }
           }
         }
       },
-      # Bedrock Token Usage
+      # Agent error count
       {
-        type   = "metric"
+        type   = "log"
         width  = 12
         height = 6
         properties = {
-          metrics = [
-            ["AWS/Bedrock", "InputTokenCount", "ModelId", var.bedrock_model_id, { stat = "Sum", label = "Input Tokens", id = "t1", color = "#2ca02c" }],
-            [".", "OutputTokenCount", ".", ".", { stat = "Sum", label = "Output Tokens", id = "t2", color = "#9467bd" }]
-          ]
-          view    = "timeSeries"
-          stacked = true
-          region  = var.bedrock_region
-          title   = "Bedrock Token Usage (${var.bedrock_model_id})"
-          period  = 300
-          stat    = "Sum"
-          yAxis = {
-            left = {
-              label     = "Tokens"
-              showUnits = false
-            }
-          }
+          region = var.aws_region
+          title  = "Agent Error Count"
+          query  = <<-EOT
+            SOURCE '/aws/lambda/alex-planner' | SOURCE '/aws/lambda/alex-tagger' | SOURCE '/aws/lambda/alex-reporter' | SOURCE '/aws/lambda/alex-charter' | SOURCE '/aws/lambda/alex-retirement'
+            | filter @message like /ERROR/ or @message like /FAILED/ or @message like /Traceback/
+            | stats count() as error_count by bin(5m), @log
+          EOT
+          view   = "timeSeries"
         }
       },
-      # Bedrock Latency
+      # Agent invocations with the current OpenAI model configuration
       {
         type   = "metric"
         width  = 12
         height = 6
         properties = {
           metrics = [
-            ["AWS/Bedrock", "InvocationLatency", "ModelId", var.bedrock_model_id, { stat = "Average", label = "Average Latency", id = "l1", color = "#1f77b4" }],
-            [".", ".", ".", ".", { stat = "Maximum", label = "Max Latency", id = "l2", color = "#d62728" }],
-            [".", ".", ".", ".", { stat = "Minimum", label = "Min Latency", id = "l3", color = "#2ca02c" }]
+            ["AWS/Lambda", "Invocations", "FunctionName", "alex-planner", { stat = "Sum", label = "Planner · gpt-5.4-mini", id = "p2", color = "#1f77b4" }],
+            [".", ".", ".", "alex-reporter", { stat = "Sum", label = "Reporter · gpt-5.4-mini", id = "r2", color = "#2ca02c" }],
+            [".", ".", ".", "alex-charter", { stat = "Sum", label = "Charter · gpt-4.1-nano", id = "c2", color = "#ff7f0e" }],
+            [".", ".", ".", "alex-retirement", { stat = "Sum", label = "Retirement · gpt-5.4-nano", id = "rt2", color = "#d62728" }],
+            [".", ".", ".", "alex-tagger", { stat = "Sum", label = "Tagger · gpt-5.4-nano", id = "t2", color = "#9467bd" }]
           ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.bedrock_region
-          title   = "Bedrock Response Latency (${var.bedrock_model_id})"
-          period  = 300
+          view   = "timeSeries"
+          region = var.aws_region
+          title  = "OpenAI Agent Invocations (Current Model Configuration)"
+          period = 300
+          stat   = "Sum"
           yAxis = {
             left = {
-              label     = "Latency (ms)"
+              label     = "Invocation Count"
               showUnits = false
             }
           }

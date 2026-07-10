@@ -16,7 +16,7 @@ output "dashboard_names" {
 
 output "setup_instructions" {
   description = "Instructions for using the dashboards"
-  value = <<-EOT
+  value       = <<-EOT
 
     ✅ CloudWatch Dashboards deployed successfully!
 
@@ -35,13 +35,13 @@ output "setup_instructions" {
 
     Dashboard Features:
 
-    AI Model Usage Dashboard:
-    - Bedrock model invocations and errors
-    - Token usage (input/output) tracking
-    - Model response latency metrics
+    OpenAI Agent & AI Usage Dashboard:
+    - OpenAI agent latency with the current model configuration
+    - Agent error counts over time
+    - OpenAI agent invocations with the current model configuration
     - SageMaker endpoint invocations
     - SageMaker model latency
-    - Endpoint resource utilization (CPU/Memory)
+    - Use LangFuse or the OpenAI platform for token usage and cost data
 
     Agent Performance Dashboard:
     - Execution times for each agent

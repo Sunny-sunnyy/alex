@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import subprocess
 import zipfile
+import re
 import argparse
 from pathlib import Path
 
@@ -43,28 +44,33 @@ def package_lambda():
             cwd=str(charter_dir)
         )
 
-        # Filter out packages that don't work in Lambda
+        # Strip ANSI color codes and filter out packages that don't work in Lambda
+        import re
+        ansi_stripped = re.sub(r'\x1b\[[0-9;]*m', '', requirements_result)
         filtered_requirements = []
-        for line in requirements_result.splitlines():
-            # Skip pyperclip (clipboard library not needed in Lambda)
-            if line.startswith("pyperclip"):
-                print(f"Excluding from Lambda: {line}")
+        for line in ansi_stripped.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            if stripped.startswith("pyperclip"):
+                print(f"Excluding from Lambda: {stripped}")
                 continue
             filtered_requirements.append(line)
 
         req_file = temp_path / "requirements.txt"
         req_file.write_text("\n".join(filtered_requirements))
-        
+
         # Use Docker to install dependencies for Lambda's architecture
         docker_cmd = [
             "docker", "run", "--rm",
             "--platform", "linux/amd64",
             "-v", f"{temp_path}:/build",
             "-v", f"{backend_dir}/database:/database",
+            "-v", f"{backend_dir}/shared:/shared",
             "--entrypoint", "/bin/bash",
             "public.ecr.aws/lambda/python:3.12",
             "-c",
-            """cd /build && pip install --target ./package -r requirements.txt && pip install --target ./package --no-deps /database"""
+            """cd /build && pip install --target ./package -r requirements.txt && pip install --target ./package --no-deps /database && pip install --target ./package --no-deps /shared"""
         ]
         
         run_command(docker_cmd)

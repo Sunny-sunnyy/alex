@@ -113,6 +113,11 @@ requires-dist = [
 ]
 
 [[package]]
+name = "alex-shared"
+version = "0.1.0"
+source = { editable = "shared" }
+
+[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -159,6 +164,7 @@ version = "0.1.0"
 source = { virtual = "api" }
 dependencies = [
     { name = "alex-database" },
+    { name = "alex-shared" },
     { name = "boto3" },
     { name = "fastapi" },
     { name = "fastapi-clerk-auth" },
@@ -173,6 +179,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alex-database", editable = "database" },
+    { name = "alex-shared", editable = "shared" },
     { name = "boto3", specifier = ">=1.40.29" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "fastapi-clerk-auth", specifier = ">=0.0.7" },

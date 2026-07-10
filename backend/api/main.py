@@ -28,6 +28,7 @@ from src.schemas import (
     JobCreate, JobUpdate,
     JobType, JobStatus
 )
+from alex_shared.guardrails import sanitize_user_input
 
 # Load environment variables
 load_dotenv(override=True)
@@ -193,6 +194,10 @@ async def get_or_create_user(
 async def update_user(user_update: UserUpdate, clerk_user_id: str = Depends(get_current_user_id)):
     """Update user settings"""
 
+    # Guide 8 guardrail: sanitize user-provided text
+    if user_update.display_name:
+        user_update.display_name = sanitize_user_input(user_update.display_name)
+
     try:
         # Get user
         user = db.users.find_by_clerk_id(clerk_user_id)
@@ -236,6 +241,11 @@ async def list_accounts(clerk_user_id: str = Depends(get_current_user_id)):
 async def create_account(account: AccountCreate, clerk_user_id: str = Depends(get_current_user_id)):
     """Create new account"""
 
+    # Guide 8 guardrail: sanitize user-provided text
+    account.account_name = sanitize_user_input(account.account_name)
+    if account.account_purpose:
+        account.account_purpose = sanitize_user_input(account.account_purpose)
+
     try:
         # Verify user exists
         user = db.users.find_by_clerk_id(clerk_user_id)
@@ -261,6 +271,12 @@ async def create_account(account: AccountCreate, clerk_user_id: str = Depends(ge
 @app.put("/api/accounts/{account_id}")
 async def update_account(account_id: str, account_update: AccountUpdate, clerk_user_id: str = Depends(get_current_user_id)):
     """Update account"""
+
+    # Guide 8 guardrail: sanitize user-provided text
+    if account_update.account_name:
+        account_update.account_name = sanitize_user_input(account_update.account_name)
+    if account_update.account_purpose:
+        account_update.account_purpose = sanitize_user_input(account_update.account_purpose)
 
     try:
         # Verify account belongs to user

@@ -8,9 +8,12 @@ import json
 import time
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any
 
-from agents import Agent, Runner, trace
+from agents import Agent, Runner, RunConfig
+from alex_shared.guardrails import validate_chart_data, truncate_response
+from alex_shared.audit import AuditLogger
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from litellm.exceptions import RateLimitError
 
@@ -42,6 +45,14 @@ async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None
     t_start = time.monotonic()
     logger.info(f"run_charter_agent START | job={job_id} | model={MODEL_ID}")
 
+    # Guide 8: structured event logging (CloudWatch + LangFuse dual output)
+    logger.info(json.dumps({
+        "event": "CHARTER_STARTED",
+        "job_id": job_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": MODEL_ID,
+    }))
+
     # Create agent without tools - will output JSON
     model, task, effective_model = create_agent(job_id, portfolio_data, db)
     t_create = time.monotonic() - t_start
@@ -49,22 +60,22 @@ async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None
 
     # Run agent - no tools, no context
     t_agent_start = time.monotonic()
-    with trace("Charter Agent"):
-        agent = Agent(
-            name="Chart Maker",
-            instructions=CHARTER_INSTRUCTIONS,
-            model=model
-        )
+    agent = Agent(
+        name="Chart Maker",
+        instructions=CHARTER_INSTRUCTIONS,
+        model=model
+    )
 
-        result = await Runner.run(
-            agent,
-            input=task,
-            max_turns=5  # Reduced since we expect one-shot JSON response
-        )
+    result = await Runner.run(
+        agent,
+        input=task,
+        max_turns=5,  # Reduced since we expect one-shot JSON response
+        run_config=RunConfig(workflow_name="Charter Agent"),
+    )
 
-        # Extract and parse JSON from the output
-        output = result.final_output
-        logger.info(f"Charter: Agent completed, output length: {len(output) if output else 0}")
+    # Extract and parse JSON from the output
+    output = result.final_output
+    logger.info(f"Charter: Agent completed, output length: {len(output) if output else 0}")
 
     t_agent = time.monotonic() - t_agent_start
     logger.info(f"[TIMING] Agent run phase: {t_agent:.2f}s | model={effective_model}")
@@ -100,6 +111,13 @@ async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None
                 charts = parsed_data.get('charts', [])
                 logger.info(f"Charter: Successfully parsed JSON, found {len(charts)} charts")
 
+                # Guide 8 guardrail: validate chart structure
+                is_valid, validation_error, _ = validate_chart_data(json_str)
+                if not is_valid:
+                    logger.error(f"Charter: Chart validation failed: {validation_error}")
+                    charts_data = {}
+                    charts_saved = False
+
                 if charts:
                     # Build the charts_payload with chart keys as top-level keys
                     charts_data = {}
@@ -131,10 +149,30 @@ async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None
 
     t_db = time.monotonic() - t_db_start
     t_total = time.monotonic() - t_start
+    t_total_ms = int(t_total * 1000)
     logger.info(
         f"[TIMING] run_charter_agent TOTAL: {t_total:.2f}s "
         f"(create={t_create:.2f}s, agent={t_agent:.2f}s, db={t_db:.2f}s) | model={effective_model}"
     )
+
+    # Guide 8: audit log
+    AuditLogger.log_ai_decision(
+        agent_name="charter",
+        job_id=job_id,
+        input_data={"task_preview": str(task)[:500]},
+        output_data=charts_data if charts_data else {},
+        model_used=effective_model,
+        duration_ms=t_total_ms,
+    )
+
+    # Guide 8: structured completion event
+    logger.info(json.dumps({
+        "event": "CHARTER_COMPLETED",
+        "job_id": job_id,
+        "duration_ms": t_total_ms,
+        "model": effective_model,
+        "charts_count": len(charts_data) if charts_data else 0,
+    }))
 
     return {
         'success': charts_saved,

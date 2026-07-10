@@ -8,11 +8,14 @@ import json
 import time
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any
 
-from agents import Agent, Runner, trace
+from agents import Agent, Runner, RunConfig
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from litellm.exceptions import RateLimitError
+from alex_shared.guardrails import sanitize_user_input
+from alex_shared.audit import AuditLogger
 
 try:
     from dotenv import load_dotenv
@@ -48,6 +51,17 @@ async def run_orchestrator(job_id: str) -> None:
         # Update job status to running
         db.jobs.update_status(job_id, 'running')
 
+        # Guide 8: fetch job for user_id logging
+        job = db.jobs.find_by_id(job_id)
+        user_id = job["clerk_user_id"] if job else "unknown"
+        logger.info(json.dumps({
+            "event": "PLANNER_STARTED",
+            "job_id": job_id,
+            "user_id": user_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": MODEL_ID,
+        }))
+
         # Handle missing instruments first (non-agent pre-processing)
         t_pre_start = time.monotonic()
         await asyncio.to_thread(handle_missing_instruments, job_id, db)
@@ -66,24 +80,33 @@ async def run_orchestrator(job_id: str) -> None:
 
         # Run the orchestrator
         t_agent_start = time.monotonic()
-        with trace("Planner Orchestrator"):
-            from agent import PlannerContext
-            agent = Agent[PlannerContext](
-                name="Financial Planner",
-                instructions=ORCHESTRATOR_INSTRUCTIONS,
-                model=model,
-                tools=tools
-            )
+        from agent import PlannerContext
+        agent = Agent[PlannerContext](
+            name="Financial Planner",
+            instructions=ORCHESTRATOR_INSTRUCTIONS,
+            model=model,
+            tools=tools
+        )
 
-            result = await Runner.run(
-                agent,
-                input=task,
-                context=context,
-                max_turns=20
-            )
+        # Guide 8: log expected agent invocations (tools in agent.py handle actual invoke)
+        for agent_name in ["reporter", "charter", "retirement"]:
+            logger.info(json.dumps({
+                "event": "AGENT_INVOKED",
+                "agent": agent_name,
+                "job_id": job_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }))
 
-            # Mark job as completed after all agents finish
-            db.jobs.update_status(job_id, "completed")
+        result = await Runner.run(
+            agent,
+            input=task,
+            context=context,
+            max_turns=20,
+            run_config=RunConfig(workflow_name="Planner Orchestrator"),
+        )
+
+        # Mark job as completed after all agents finish
+        db.jobs.update_status(job_id, "completed")
 
         t_agent = time.monotonic() - t_agent_start
         t_total = time.monotonic() - t_start
@@ -93,6 +116,26 @@ async def run_orchestrator(job_id: str) -> None:
             f"(pre={t_pre:.2f}s, agent={t_agent:.2f}s) | model={effective_model}"
         )
         logger.info(f"Planner: Job {job_id} completed successfully")
+
+        # Guide 8: audit log
+        AuditLogger.log_ai_decision(
+            agent_name="planner",
+            job_id=job_id,
+            input_data={"task_preview": str(task)[:500]},
+            output_data={"status": "completed"},
+            model_used=effective_model,
+            duration_ms=int(t_total * 1000),
+        )
+
+        # Guide 8: structured completion event
+        logger.info(json.dumps({
+            "event": "PLANNER_COMPLETED",
+            "job_id": job_id,
+            "user_id": user_id,
+            "duration_ms": int(t_total * 1000),
+            "model": effective_model,
+            "status": "success",
+        }))
 
     except Exception as e:
         t_total = time.monotonic() - t_start

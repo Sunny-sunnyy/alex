@@ -9,11 +9,13 @@ import time
 import asyncio
 import logging
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
-from agents import Agent, Runner, trace
+from agents import Agent, Runner, RunConfig
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from litellm.exceptions import RateLimitError
+from alex_shared.guardrails import truncate_response
+from alex_shared.audit import AuditLogger
 
 
 class AgentTemporaryError(Exception):
@@ -73,6 +75,14 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
     t_start = time.monotonic()
     logger.info(f"run_retirement_agent START | job={job_id} | model={MODEL_ID}")
 
+    # Guide 8: structured event logging
+    logger.info(json.dumps({
+        "event": "RETIREMENT_STARTED",
+        "job_id": job_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": MODEL_ID,
+    }))
+
     # Get user preferences
     user_preferences = get_user_preferences(job_id)
 
@@ -86,37 +96,40 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
 
     # Run agent (simplified - no context)
     t_agent_start = time.monotonic()
-    with trace("Retirement Agent"):
-        agent = Agent(
-            name="Retirement Specialist",
-            instructions=RETIREMENT_INSTRUCTIONS,
-            model=model,
-            tools=tools  # Empty list now
-        )
+    agent = Agent(
+        name="Retirement Specialist",
+        instructions=RETIREMENT_INSTRUCTIONS,
+        model=model,
+        tools=tools
+    )
 
-        try:
-            result = await Runner.run(
-                agent,
-                input=task,
-                max_turns=20
-            )
-        except (TimeoutError, asyncio.TimeoutError) as e:
-            logger.warning(f"Retirement agent timeout: {e}")
-            raise AgentTemporaryError(f"Timeout during agent execution: {e}")
-        except Exception as e:
-            error_str = str(e).lower()
-            if "timeout" in error_str or "throttled" in error_str:
-                logger.warning(f"Retirement temporary error: {e}")
-                raise AgentTemporaryError(f"Temporary error: {e}")
-            raise  # Re-raise non-retryable errors
+    try:
+        result = await Runner.run(
+            agent,
+            input=task,
+            max_turns=20,
+            run_config=RunConfig(workflow_name="Retirement Agent"),
+        )
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        logger.warning(f"Retirement agent timeout: {e}")
+        raise AgentTemporaryError(f"Timeout during agent execution: {e}")
+    except Exception as e:
+        error_str = str(e).lower()
+        if "timeout" in error_str or "throttled" in error_str:
+            logger.warning(f"Retirement temporary error: {e}")
+            raise AgentTemporaryError(f"Temporary error: {e}")
+        raise
 
     t_agent = time.monotonic() - t_agent_start
     logger.info(f"[TIMING] Agent run phase: {t_agent:.2f}s | model={effective_model}")
 
+    # Guide 8 guardrail: truncate oversized responses
+    response = truncate_response(result.final_output)
+
     # Save the analysis to database
     t_db_start = time.monotonic()
     retirement_payload = {
-        'analysis': result.final_output,
+        'analysis': response,
         'generated_at': datetime.utcnow().isoformat(),
         'agent': 'retirement'
     }
@@ -128,10 +141,30 @@ async def run_retirement_agent(job_id: str, portfolio_data: Dict[str, Any]) -> D
 
     t_db = time.monotonic() - t_db_start
     t_total = time.monotonic() - t_start
+    t_total_ms = int(t_total * 1000)
     logger.info(
         f"[TIMING] run_retirement_agent TOTAL: {t_total:.2f}s "
         f"(create={t_create:.2f}s, agent={t_agent:.2f}s, db={t_db:.2f}s) | model={effective_model}"
     )
+
+    # Guide 8: audit log
+    AuditLogger.log_ai_decision(
+        agent_name="retirement",
+        job_id=job_id,
+        input_data={"task_preview": str(task)[:500]},
+        output_data={"analysis_length": len(response)},
+        model_used=effective_model,
+        duration_ms=t_total_ms,
+    )
+
+    # Guide 8: structured completion event
+    logger.info(json.dumps({
+        "event": "RETIREMENT_COMPLETED",
+        "job_id": job_id,
+        "duration_ms": t_total_ms,
+        "model": effective_model,
+        "analysis_length": len(response),
+    }))
 
     return {
         'success': success,

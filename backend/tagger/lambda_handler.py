@@ -9,12 +9,14 @@ import json
 import time
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 from src import Database
 from src.schemas import InstrumentCreate
 from agent import tag_instruments, classification_to_db_format, MODEL_ID
 from observability import observe
+from alex_shared.audit import AuditLogger
 
 # Configure logging
 logger = logging.getLogger()
@@ -35,6 +37,15 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
     """
     t_start = time.monotonic()
     logger.info(f"process_instruments: {len(instruments)} instruments | model={MODEL_ID}")
+
+    # Guide 8: structured event logging
+    logger.info(json.dumps({
+        "event": "TAGGER_STARTED",
+        "job_id": "batch",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": MODEL_ID,
+        "instrument_count": len(instruments),
+    }))
 
     # Run the classification
     classifications = await tag_instruments(instruments)
@@ -86,6 +97,15 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
         f"[TIMING] process_instruments total: {t_total:.2f}s "
         f"(classify={t_classify:.2f}s, db={t_total - t_classify:.2f}s) | model={MODEL_ID}"
     )
+
+    # Guide 8: structured completion event
+    logger.info(json.dumps({
+        "event": "TAGGER_COMPLETED",
+        "duration_ms": int(t_total * 1000),
+        "model": MODEL_ID,
+        "updated_count": len(updated),
+        "error_count": len(errors),
+    }))
 
     # Prepare response (convert Pydantic models to dicts)
     return {

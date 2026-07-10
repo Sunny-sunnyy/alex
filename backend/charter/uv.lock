@@ -105,6 +105,11 @@ requires-dist = [
 ]
 
 [[package]]
+name = "alex-shared"
+version = "0.1.0"
+source = { editable = "../shared" }
+
+[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -266,6 +271,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "alex-database" },
+    { name = "alex-shared" },
     { name = "boto3" },
     { name = "langfuse" },
     { name = "openai-agents", extra = ["litellm"] },
@@ -278,6 +284,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alex-database", editable = "../database" },
+    { name = "alex-shared", editable = "../shared" },
     { name = "boto3", specifier = ">=1.40.9" },
     { name = "langfuse", specifier = ">=3.3.4" },
     { name = "openai-agents", extras = ["litellm"], specifier = ">=0.2.6" },

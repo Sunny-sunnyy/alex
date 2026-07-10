@@ -10,7 +10,7 @@ import logging
 from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-from agents import Agent, Runner, trace
+from agents import Agent, Runner, RunConfig
 from agents.extensions.models.litellm_model import LitellmModel
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -96,6 +96,9 @@ class InstrumentClassification(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    rationale: str = Field(
+        description="Detailed explanation of why these classifications were chosen, including specific factors considered. Explain your reasoning BEFORE providing the classification data."
+    )
     symbol: str = Field(description="Ticker symbol of the instrument")
     name: str = Field(description="Name of the instrument")
     instrument_type: str = Field(description="Type: etf, stock, mutual_fund, bond_fund, etc.")
@@ -186,19 +189,27 @@ async def classify_instrument(
         )
 
         # Run the agent (following gameplan pattern exactly)
-        with trace(f"Classify {symbol}"):
-            agent = Agent(
-                name="InstrumentTagger",
-                instructions=TAGGER_INSTRUCTIONS,
-                model=model,
-                tools=[],  # No tools needed for classification
-                output_type=InstrumentClassification,  # Specify structured output type
-            )
+        agent = Agent(
+            name="InstrumentTagger",
+            instructions=TAGGER_INSTRUCTIONS,
+            model=model,
+            tools=[],
+            output_type=InstrumentClassification,
+        )
 
-            result = await Runner.run(agent, input=task, max_turns=5)
+        result = await Runner.run(
+            agent,
+            input=task,
+            max_turns=5,
+            run_config=RunConfig(workflow_name=f"Classify {symbol}"),
+        )
 
-            # Extract the structured output from RunResult using final_output_as
-            classification = result.final_output_as(InstrumentClassification)
+        classification = result.final_output_as(InstrumentClassification)
+
+        # Guide 8 explainability: log the model's reasoning
+        logger.info(
+            f"Classification rationale for {symbol}: {classification.rationale[:500]}"
+        )
 
         elapsed = time.monotonic() - t_start
         logger.info(

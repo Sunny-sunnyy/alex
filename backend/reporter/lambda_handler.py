@@ -9,12 +9,14 @@ import time
 import asyncio
 import logging
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
-from agents import Agent, Runner, trace
+from agents import Agent, Runner, RunConfig
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from litellm.exceptions import RateLimitError
 from judge import evaluate
+from alex_shared.guardrails import truncate_response
+from alex_shared.audit import AuditLogger
 
 GUARD_AGAINST_SCORE = 0.3  # Guard against score being too low
 
@@ -56,6 +58,14 @@ async def run_reporter_agent(
     t_start = time.monotonic()
     logger.info(f"run_reporter_agent START | job={job_id} | model={MODEL_ID}")
 
+    # Guide 8: structured event logging
+    logger.info(json.dumps({
+        "event": "REPORTER_STARTED",
+        "job_id": job_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": MODEL_ID,
+    }))
+
     # Create agent with tools and context
     model, tools, task, context, effective_model = create_agent(job_id, portfolio_data, user_data, db)
     t_create = time.monotonic() - t_start
@@ -63,31 +73,34 @@ async def run_reporter_agent(
 
     # Run agent with context
     t_agent_start = time.monotonic()
-    with trace("Reporter Agent"):
-        agent = Agent[ReporterContext](  # Specify the context type
-            name="Report Writer", instructions=REPORTER_INSTRUCTIONS, model=model, tools=tools
-        )
+    agent = Agent[ReporterContext](
+        name="Report Writer", instructions=REPORTER_INSTRUCTIONS, model=model, tools=tools
+    )
 
-        result = await Runner.run(
-            agent,
-            input=task,
-            context=context,  # Pass the context
-            max_turns=10,
-        )
+    result = await Runner.run(
+        agent,
+        input=task,
+        context=context,
+        max_turns=10,
+        run_config=RunConfig(workflow_name="Reporter Agent"),
+    )
 
-        response = result.final_output
+    response = result.final_output
 
-        if observability:
-            with observability.start_as_current_span(name="judge") as span:
-                evaluation = await evaluate(REPORTER_INSTRUCTIONS, task, response)
-                score = evaluation.score / 100
-                comment = evaluation.feedback
-                span.score(name="Judge", value=score, data_type="NUMERIC", comment=comment)
-                observation = f"Score: {score} - Feedback: {comment}"
-                observability.create_event(name="Judge Event", status_message=observation)
-                if score < GUARD_AGAINST_SCORE:
-                    logger.error(f"Reporter score is too low: {score}")
-                    response = "I'm sorry, I'm not able to generate a report for you. Please try again later."
+    if observability:
+        with observability.start_as_current_span(name="judge") as span:
+            evaluation = await evaluate(REPORTER_INSTRUCTIONS, task, response)
+            score = evaluation.score / 100
+            comment = evaluation.feedback
+            span.score(name="Judge", value=score, data_type="NUMERIC", comment=comment)
+            observation = f"Score: {score} - Feedback: {comment}"
+            observability.create_event(name="Judge Event", status_message=observation)
+            if score < GUARD_AGAINST_SCORE:
+                logger.error(f"Reporter score is too low: {score}")
+                response = "I'm sorry, I'm not able to generate a report for you. Please try again later."
+
+    # Guide 8 guardrail: truncate oversized responses
+    response = truncate_response(response)
 
     t_agent = time.monotonic() - t_agent_start
     logger.info(f"[TIMING] Agent run phase: {t_agent:.2f}s | model={effective_model}")
@@ -107,10 +120,31 @@ async def run_reporter_agent(
 
     t_db = time.monotonic() - t_db_start
     t_total = time.monotonic() - t_start
+    t_total_ms = int(t_total * 1000)
     logger.info(
         f"[TIMING] run_reporter_agent TOTAL: {t_total:.2f}s "
         f"(create={t_create:.2f}s, agent={t_agent:.2f}s, db={t_db:.2f}s) | model={effective_model}"
     )
+
+    # Guide 8: audit log
+    AuditLogger.log_ai_decision(
+        agent_name="reporter",
+        job_id=job_id,
+        input_data={"task_preview": str(task)[:500]},
+        output_data={"report_length": len(response)},
+        model_used=effective_model,
+        duration_ms=t_total_ms,
+        observability=observability,
+    )
+
+    # Guide 8: structured completion event
+    logger.info(json.dumps({
+        "event": "REPORTER_COMPLETED",
+        "job_id": job_id,
+        "duration_ms": t_total_ms,
+        "model": effective_model,
+        "report_length": len(response),
+    }))
 
     return {
         "success": success,

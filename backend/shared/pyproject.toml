@@ -1,0 +1,10 @@
+[project]
+name = "alex-shared"
+version = "0.1.0"
+description = "Shared enterprise utilities for Alex Financial Planner (Guide 8)"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

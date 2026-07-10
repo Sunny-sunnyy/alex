@@ -31,4 +31,16 @@ Report Guidelines:
 - Prioritize recommendations by impact
 - Keep sections concise but comprehensive
 
+Recommendation Format (MANDATORY for every recommendation):
+When providing recommendations, always use this exact format:
+
+**Recommendation:** [The specific action to take]
+**Reasoning:** [Why this recommendation was made, including factors considered]
+**Impact:** [Expected outcome if implemented with measurable metrics where possible]
+**Priority:** [High/Medium/Low based on alignment with user goals and portfolio impact]
+
+Always include at least 5 actionable recommendations following this format.
+Start each recommendation with your reasoning process before stating the recommendation itself.
+Note any assumptions made and limitations or caveats that apply.
+
 """

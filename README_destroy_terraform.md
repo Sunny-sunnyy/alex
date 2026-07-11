@@ -1,45 +1,45 @@
-# Destroy Toan Bo Ha Tang Terraform Cua Alex
+# Destroy Toàn Bộ Hạ Tầng Terraform Của Alex
 
-Tai lieu nay huong dan teardown toan bo ha tang AWS cua du an Alex sau khi da hoan thanh course project.
+Tài liệu này hướng dẫn teardown toàn bộ hạ tầng AWS của dự án Alex sau khi đã hoàn thành course project.
 
-Muc tieu:
+Mục tiêu:
 
-- destroy theo dung thu tu nguoc voi qua trinh hoc: Guide 8 ve Guide 2;
-- tranh bo sot tai nguyen ton chi phi;
-- tranh loi Terraform thuong gap nhu S3 bucket khong rong;
-- giu rieng Guide 1 IAM permissions vi phan nay khong nam trong Terraform.
+- destroy theo đúng thứ tự ngược với quá trình học: Guide 8 về Guide 2;
+- tránh bỏ sót tài nguyên còn phát sinh chi phí;
+- tránh lỗi Terraform thường gặp như S3 bucket không rỗng;
+- tách riêng Guide 1 IAM permissions vì phần này không nằm trong Terraform.
 
 Source of truth:
 
-1. code va Terraform hien tai trong repo;
-2. README hien tai cua tung folder;
+1. code và Terraform hiện tại trong repo;
+2. README hiện tại của từng folder;
 3. `guides/*.md`;
-4. `scripts/destroy.py` chi dung cho Part 7, khong destroy toan bo project.
+4. `scripts/destroy.py` chỉ dùng cho Part 7, không destroy toàn bộ project.
 
-## Canh Bao Quan Trong
+## Cảnh Báo Quan Trọng
 
-Destroy se xoa tai nguyen that tren AWS.
+Destroy sẽ xóa tài nguyên thật trên AWS.
 
-Nhung du lieu se mat vinh vien neu destroy:
+Những dữ liệu sẽ mất vĩnh viễn nếu destroy:
 
 - Aurora database trong Part 5: users, accounts, positions, jobs, reports, charts, retirement payloads;
 - S3 Vectors / vector bucket trong Part 3: research knowledge base;
 - frontend S3 static files;
-- Lambda packages tren S3;
+- Lambda packages trên S3;
 - CloudWatch dashboards Part 8.
 
-Khong chay file nay nhu mot script. Hay doc tung buoc, chay tung command, kiem tra output, roi moi tiep tuc.
+Không chạy tài liệu này như một script. Hãy đọc từng bước, chạy từng command, kiểm tra output, rồi mới tiếp tục.
 
-Khong in secrets:
+Không in secrets:
 
-- khong dump `.env`;
-- khong dump `terraform.tfvars`;
-- khong in API keys;
-- khong dump Lambda environment variables day du.
+- không dump `.env`;
+- không dump `terraform.tfvars`;
+- không in API keys;
+- không dump đầy đủ Lambda environment variables.
 
-## Thu Tu Destroy Chuan
+## Thứ Tự Destroy Chuẩn
 
-Chay theo thu tu nguoc:
+Chạy theo thứ tự ngược:
 
 1. `terraform/8_enterprise`
 2. `terraform/7_frontend`
@@ -48,43 +48,43 @@ Chay theo thu tu nguoc:
 5. `terraform/4_researcher`
 6. `terraform/3_ingestion`
 7. `terraform/2_sagemaker`
-8. Guide 1 IAM permissions: tu xoa thu cong neu muon
+8. Guide 1 IAM permissions: tự xóa thủ công nếu muốn
 
-Ly do:
+Lý do:
 
-- Part 7 phu thuoc Part 5 va Part 6 local state;
-- Part 6 phu thuoc database, SageMaker va S3 Vectors;
-- Part 4 ghi vao ingest API Part 3;
-- Part 3 phu thuoc SageMaker Part 2;
-- Part 8 chi la monitoring/dashboard nen destroy dau tien an toan nhat.
+- Part 7 phụ thuộc Part 5 và Part 6 local state;
+- Part 6 phụ thuộc database, SageMaker và S3 Vectors;
+- Part 4 ghi vào ingest API Part 3;
+- Part 3 phụ thuộc SageMaker Part 2;
+- Part 8 chỉ là monitoring/dashboard nên destroy đầu tiên là an toàn nhất.
 
-## Pre-check Truoc Khi Destroy
+## Pre-check Trước Khi Destroy
 
-Tu root project:
+Từ root project:
 
 ```bash
 git status --short
 ```
 
-Kiem tra AWS identity dang dung:
+Kiểm tra AWS identity đang dùng:
 
 ```bash
 aws sts get-caller-identity
 ```
 
-Kiem tra region mac dinh:
+Kiểm tra region mặc định:
 
 ```bash
 aws configure get region
 ```
 
-Kiem tra cac Terraform state dang ton tai:
+Kiểm tra các Terraform state đang tồn tại:
 
 ```bash
 find terraform -maxdepth 2 -name terraform.tfstate -print
 ```
 
-Trong repo hien tai, neu da deploy day du, ky vong co state o:
+Trong repo hiện tại, nếu đã deploy đầy đủ, kỳ vọng có state ở:
 
 ```text
 terraform/2_sagemaker/terraform.tfstate
@@ -96,7 +96,7 @@ terraform/7_frontend/terraform.tfstate
 terraform/8_enterprise/terraform.tfstate
 ```
 
-Neu muon luu lai thong tin de audit truoc khi xoa, co the chay cac output khong sensitive:
+Nếu muốn lưu lại thông tin audit trước khi xóa, có thể chạy các output không sensitive:
 
 ```bash
 cd terraform/8_enterprise && terraform output dashboard_names && cd ../..
@@ -108,16 +108,20 @@ cd terraform/3_ingestion && terraform output vector_bucket_name && terraform out
 cd terraform/2_sagemaker && terraform output sagemaker_endpoint_name && cd ../..
 ```
 
-Khong chay `terraform output -raw api_key_value`.
+Không chạy:
 
-## Buoc 1: Destroy Part 8 - Enterprise Dashboards
+```bash
+terraform output -raw api_key_value
+```
 
-Tu guide/README hien tai, Part 8 tao CloudWatch dashboards:
+## Bước 1: Destroy Part 8 - Enterprise Dashboards
+
+Part 8 tạo CloudWatch dashboards:
 
 - `alex-ai-model-usage`
 - `alex-agent-performance`
 
-Lenh:
+Lệnh:
 
 ```bash
 cd terraform/8_enterprise
@@ -126,27 +130,27 @@ terraform plan -destroy
 terraform destroy
 ```
 
-Khi Terraform hoi xac nhan, go:
+Khi Terraform hỏi xác nhận, gõ:
 
 ```text
 yes
 ```
 
-Kiem tra sau destroy:
+Kiểm tra sau destroy:
 
 ```bash
 aws cloudwatch list-dashboards --dashboard-name-prefix alex
 ```
 
-Quay ve root:
+Quay về root:
 
 ```bash
 cd ../..
 ```
 
-## Buoc 2: Destroy Part 7 - Frontend Va API
+## Bước 2: Destroy Part 7 - Frontend Và API
 
-Part 7 gom:
+Part 7 gồm:
 
 - S3 bucket static frontend;
 - CloudFront distribution;
@@ -154,11 +158,11 @@ Part 7 gom:
 - Lambda `alex-api`;
 - IAM role/policies cho API Lambda.
 
-Guide 7 noi khi destroy everything thi chay reverse order `7, 6, 5, 4, 3, 2`.
+Guide 7 ghi rằng khi destroy everything thì chạy reverse order `7, 6, 5, 4, 3, 2`.
 
-Trong repo hien tai co `scripts/destroy.py`, nhung script do chi destroy Part 7. Tai lieu nay uu tien manual commands de ro tung buoc.
+Trong repo hiện tại có `scripts/destroy.py`, nhưng script đó chỉ destroy Part 7. Tài liệu này ưu tiên manual commands để rõ từng bước.
 
-### 2.1 Lay ten frontend bucket
+### 2.1 Lấy tên frontend bucket
 
 ```bash
 cd terraform/7_frontend
@@ -166,15 +170,15 @@ FRONTEND_BUCKET=$(terraform output -raw s3_bucket_name)
 echo "${FRONTEND_BUCKET}"
 ```
 
-### 2.2 Empty frontend bucket truoc khi Terraform destroy
+### 2.2 Empty frontend bucket trước khi Terraform destroy
 
-S3 bucket phai rong truoc khi xoa:
+S3 bucket phải rỗng trước khi xóa:
 
 ```bash
 aws s3 rm "s3://${FRONTEND_BUCKET}" --recursive
 ```
 
-Neu bucket co versioning hoac delete markers, chay them:
+Nếu bucket có versioning hoặc delete markers, chạy thêm:
 
 ```bash
 aws s3api list-object-versions \
@@ -183,7 +187,7 @@ aws s3api list-object-versions \
   --output json > /tmp/alex-frontend-versions.json
 ```
 
-Chi chay lenh delete versions neu file tren co objects:
+Chỉ chạy lệnh delete versions nếu file trên có objects:
 
 ```bash
 aws s3api delete-objects \
@@ -191,7 +195,7 @@ aws s3api delete-objects \
   --delete file:///tmp/alex-frontend-versions.json
 ```
 
-Neu lenh bao `Invalid length for parameter Delete.Objects`, nghia la khong co versions de xoa; co the bo qua.
+Nếu lệnh báo `Invalid length for parameter Delete.Objects`, nghĩa là không có versions để xóa; có thể bỏ qua.
 
 ### 2.3 Destroy Terraform Part 7
 
@@ -200,15 +204,15 @@ terraform plan -destroy
 terraform destroy
 ```
 
-Khi Terraform hoi xac nhan, go:
+Khi Terraform hỏi xác nhận, gõ:
 
 ```text
 yes
 ```
 
-CloudFront co the mat vai phut de disable/delete. Neu Terraform dang cho CloudFront, hay doi den khi command ket thuc.
+CloudFront có thể mất vài phút để disable/delete. Nếu Terraform đang chờ CloudFront, hãy đợi đến khi command kết thúc.
 
-Kiem tra sau destroy:
+Kiểm tra sau destroy:
 
 ```bash
 aws lambda get-function --function-name alex-api
@@ -216,17 +220,17 @@ aws apigatewayv2 get-apis --query "Items[?Name=='alex-api-gateway']"
 aws s3 ls "s3://${FRONTEND_BUCKET}"
 ```
 
-Mot so lenh verify co the tra loi `ResourceNotFoundException` hoac `NoSuchBucket`; do la ket qua mong muon sau destroy.
+Một số lệnh verify có thể trả lời `ResourceNotFoundException` hoặc `NoSuchBucket`; đó là kết quả mong muốn sau destroy.
 
-Quay ve root:
+Quay về root:
 
 ```bash
 cd ../..
 ```
 
-## Buoc 3: Destroy Part 6 - Agent Orchestra
+## Bước 3: Destroy Part 6 - Agent Orchestra
 
-Part 6 gom:
+Part 6 gồm:
 
 - SQS queue `alex-analysis-jobs`;
 - SQS DLQ;
@@ -240,11 +244,11 @@ Part 6 gom:
 - IAM role/policies;
 - CloudWatch log groups.
 
-Guide 7 noi destroy everything theo reverse order co Part 6 sau Part 7.
+Guide 7 ghi destroy everything theo reverse order, trong đó Part 6 chạy sau Part 7.
 
 ### 3.1 Empty Lambda package bucket
 
-Terraform Part 6 tao bucket chua ZIP package. Neu bucket con object, `terraform destroy` co the fail.
+Terraform Part 6 tạo bucket chứa ZIP package. Nếu bucket còn object, `terraform destroy` có thể fail.
 
 ```bash
 cd terraform/6_agents
@@ -254,7 +258,7 @@ echo "${LAMBDA_PACKAGE_BUCKET}"
 aws s3 rm "s3://${LAMBDA_PACKAGE_BUCKET}" --recursive
 ```
 
-Neu bucket khong ton tai hoac da rong, co the tiep tuc.
+Nếu bucket không tồn tại hoặc đã rỗng, có thể tiếp tục.
 
 ### 3.2 Destroy Terraform Part 6
 
@@ -264,13 +268,13 @@ terraform plan -destroy
 terraform destroy
 ```
 
-Khi Terraform hoi xac nhan, go:
+Khi Terraform hỏi xác nhận, gõ:
 
 ```text
 yes
 ```
 
-Kiem tra sau destroy:
+Kiểm tra sau destroy:
 
 ```bash
 aws lambda list-functions --query "Functions[?starts_with(FunctionName, 'alex-')].FunctionName"
@@ -278,17 +282,17 @@ aws sqs list-queues --queue-name-prefix alex-analysis
 aws s3 ls "s3://${LAMBDA_PACKAGE_BUCKET}"
 ```
 
-Sau Part 6 destroy, cac job moi tu frontend se khong con duoc process.
+Sau Part 6 destroy, các job mới từ frontend sẽ không còn được process.
 
-Quay ve root:
+Quay về root:
 
 ```bash
 cd ../..
 ```
 
-## Buoc 4: Destroy Part 5 - Aurora Database
+## Bước 4: Destroy Part 5 - Aurora Database
 
-Part 5 gom:
+Part 5 gồm:
 
 - Aurora PostgreSQL Serverless v2 cluster;
 - Aurora instance;
@@ -304,9 +308,9 @@ cd terraform/5_database
 terraform destroy
 ```
 
-Canh bao: buoc nay xoa database va tat ca du lieu portfolio/job/report.
+Cảnh báo: bước này xóa database và toàn bộ dữ liệu portfolio/job/report.
 
-Lenh:
+Lệnh:
 
 ```bash
 cd terraform/5_database
@@ -315,43 +319,43 @@ terraform plan -destroy
 terraform destroy
 ```
 
-Khi Terraform hoi xac nhan, go:
+Khi Terraform hỏi xác nhận, gõ:
 
 ```text
 yes
 ```
 
-Trong Terraform hien tai:
+Trong Terraform hiện tại:
 
 - `skip_final_snapshot = true`;
-- secret co `recovery_window_in_days = 0`.
+- secret có `recovery_window_in_days = 0`.
 
-Nghia la destroy duoc toi uu cho moi truong hoc/dev, khong giu final snapshot.
+Nghĩa là destroy được tối ưu cho môi trường học/dev, không giữ final snapshot.
 
-Kiem tra sau destroy:
+Kiểm tra sau destroy:
 
 ```bash
 aws rds describe-db-clusters --db-cluster-identifier alex-aurora-cluster
 aws secretsmanager list-secrets --query "SecretList[?contains(Name, 'alex-aurora-credentials')].Name"
 ```
 
-`DBClusterNotFoundFault` la ket qua mong muon neu cluster da bi xoa.
+`DBClusterNotFoundFault` là kết quả mong muốn nếu cluster đã bị xóa.
 
-Quay ve root:
+Quay về root:
 
 ```bash
 cd ../..
 ```
 
-## Buoc 5: Destroy Part 4 - Researcher
+## Bước 5: Destroy Part 4 - Researcher
 
-Part 4 implementation hien tai khac guide cu:
+Part 4 implementation hiện tại khác guide cũ:
 
-- khong con App Runner;
-- Researcher chay bang Lambda container image;
-- co ECR repository `alex-researcher`;
-- co Lambda Function URL;
-- co optional EventBridge scheduler 12 gio.
+- không còn App Runner;
+- Researcher chạy bằng Lambda container image;
+- có ECR repository `alex-researcher`;
+- có Lambda Function URL;
+- có optional EventBridge scheduler 12 giờ.
 
 Guide 4 ghi:
 
@@ -360,7 +364,7 @@ Guide 4 ghi:
 terraform destroy
 ```
 
-Lenh:
+Lệnh:
 
 ```bash
 cd terraform/4_researcher
@@ -369,15 +373,15 @@ terraform plan -destroy
 terraform destroy
 ```
 
-Khi Terraform hoi xac nhan, go:
+Khi Terraform hỏi xác nhận, gõ:
 
 ```text
 yes
 ```
 
-ECR repository trong Terraform co `force_delete = true`, nen image trong repo se duoc xoa cung repository.
+ECR repository trong Terraform có `force_delete = true`, nên image trong repo sẽ được xóa cùng repository.
 
-Kiem tra sau destroy:
+Kiểm tra sau destroy:
 
 ```bash
 aws lambda get-function --function-name alex-researcher
@@ -385,23 +389,23 @@ aws ecr describe-repositories --repository-names alex-researcher
 aws scheduler list-schedules --name-prefix alex-research
 ```
 
-`ResourceNotFoundException` hoac `RepositoryNotFoundException` la ket qua mong muon sau destroy.
+`ResourceNotFoundException` hoặc `RepositoryNotFoundException` là kết quả mong muốn sau destroy.
 
-Quay ve root:
+Quay về root:
 
 ```bash
 cd ../..
 ```
 
-## Buoc 6: Destroy Part 3 - Ingestion Pipeline Va S3 Vectors
+## Bước 6: Destroy Part 3 - Ingestion Pipeline Và S3 Vectors
 
-Part 3 gom:
+Part 3 gồm:
 
 - bucket `alex-vectors-<account_id>`;
 - S3 Vectors permissions/index access;
 - Lambda `alex-ingest`;
 - API Gateway REST API `/ingest`;
-- API key va usage plan;
+- API key và usage plan;
 - CloudWatch log group.
 
 Guide 3 ghi:
@@ -411,11 +415,11 @@ Guide 3 ghi:
 terraform destroy
 ```
 
-Guide 3 cung canh bao rang destroy Part 3 se pha ha tang ingest. Trong repo hien tai, Part 3 khong destroy SageMaker Part 2 vi SageMaker nam trong folder doc lap `terraform/2_sagemaker`.
+Guide 3 cũng cảnh báo rằng destroy Part 3 sẽ phá hạ tầng ingest. Trong repo hiện tại, Part 3 không destroy SageMaker Part 2 vì SageMaker nằm trong folder độc lập `terraform/2_sagemaker`.
 
 ### 6.1 Optional: cleanup S3 Vectors data qua script
 
-Neu muon xoa vectors bang application script truoc:
+Nếu muốn xóa vectors bằng application script trước:
 
 ```bash
 cd backend/ingest
@@ -423,9 +427,9 @@ uv run cleanup_s3vectors.py
 cd ../..
 ```
 
-Script nay yeu cau xac nhan va se xoa vectors trong index.
+Script này yêu cầu xác nhận và sẽ xóa vectors trong index.
 
-### 6.2 Empty vector bucket truoc khi Terraform destroy
+### 6.2 Empty vector bucket trước khi Terraform destroy
 
 ```bash
 cd terraform/3_ingestion
@@ -434,7 +438,7 @@ echo "${VECTOR_BUCKET}"
 aws s3 rm "s3://${VECTOR_BUCKET}" --recursive
 ```
 
-Bucket Part 3 co versioning enabled, nen can xu ly versions/delete markers neu co.
+Bucket Part 3 có versioning enabled, nên cần xử lý versions/delete markers nếu có.
 
 List versions:
 
@@ -445,7 +449,7 @@ aws s3api list-object-versions \
   --output json > /tmp/alex-vector-versions.json
 ```
 
-Delete versions neu file co objects:
+Delete versions nếu file có objects:
 
 ```bash
 aws s3api delete-objects \
@@ -462,7 +466,7 @@ aws s3api list-object-versions \
   --output json > /tmp/alex-vector-delete-markers.json
 ```
 
-Delete markers neu file co objects:
+Delete markers nếu file có objects:
 
 ```bash
 aws s3api delete-objects \
@@ -470,7 +474,7 @@ aws s3api delete-objects \
   --delete file:///tmp/alex-vector-delete-markers.json
 ```
 
-Neu lenh delete bao `Invalid length for parameter Delete.Objects`, nghia la khong co object trong nhom do; co the bo qua.
+Nếu lệnh delete báo `Invalid length for parameter Delete.Objects`, nghĩa là không có object trong nhóm đó; có thể bỏ qua.
 
 ### 6.3 Destroy Terraform Part 3
 
@@ -480,13 +484,13 @@ terraform plan -destroy
 terraform destroy
 ```
 
-Khi Terraform hoi xac nhan, go:
+Khi Terraform hỏi xác nhận, gõ:
 
 ```text
 yes
 ```
 
-Kiem tra sau destroy:
+Kiểm tra sau destroy:
 
 ```bash
 aws lambda get-function --function-name alex-ingest
@@ -494,15 +498,15 @@ aws apigateway get-rest-apis --query "items[?name=='alex-api']"
 aws s3 ls "s3://${VECTOR_BUCKET}"
 ```
 
-Quay ve root:
+Quay về root:
 
 ```bash
 cd ../..
 ```
 
-## Buoc 7: Destroy Part 2 - SageMaker Embedding Endpoint
+## Bước 7: Destroy Part 2 - SageMaker Embedding Endpoint
 
-Part 2 gom:
+Part 2 gồm:
 
 - SageMaker endpoint `alex-embedding-endpoint`;
 - endpoint configuration;
@@ -517,7 +521,7 @@ cd terraform/2_sagemaker
 terraform destroy
 ```
 
-Lenh:
+Lệnh:
 
 ```bash
 cd terraform/2_sagemaker
@@ -526,13 +530,13 @@ terraform plan -destroy
 terraform destroy
 ```
 
-Khi Terraform hoi xac nhan, go:
+Khi Terraform hỏi xác nhận, gõ:
 
 ```text
 yes
 ```
 
-Kiem tra sau destroy:
+Kiểm tra sau destroy:
 
 ```bash
 aws sagemaker describe-endpoint --endpoint-name alex-embedding-endpoint
@@ -540,9 +544,9 @@ aws sagemaker describe-model --model-name alex-embedding-model
 aws iam get-role --role-name alex-sagemaker-role
 ```
 
-`ValidationException` cho SageMaker endpoint/model hoac `NoSuchEntity` cho IAM role la ket qua mong muon sau destroy.
+`ValidationException` cho SageMaker endpoint/model hoặc `NoSuchEntity` cho IAM role là kết quả mong muốn sau destroy.
 
-Quay ve root:
+Quay về root:
 
 ```bash
 cd ../..
@@ -550,22 +554,22 @@ cd ../..
 
 ## Guide 1 - IAM Permissions
 
-Guide 1 khong co Terraform folder.
+Guide 1 không có Terraform folder.
 
-No co the da tao:
+Nó có thể đã tạo:
 
 - IAM group `AlexAccess`;
 - custom policy `AlexS3VectorsAccess`;
-- attach AWS managed policies vao group;
-- add IAM user `aiengineer` vao group.
+- attach AWS managed policies vào group;
+- add IAM user `aiengineer` vào group.
 
-Theo yeu cau hien tai, IAM user/group/policy se duoc ban tu huy thu cong neu muon.
+Theo yêu cầu hiện tại, IAM user/group/policy sẽ được bạn tự hủy thủ công nếu muốn.
 
-Tai lieu nay khong huong dan xoa IAM chi tiet de tranh vo tinh anh huong cac lab/course khac.
+Tài liệu này không hướng dẫn xóa IAM chi tiết để tránh vô tình ảnh hưởng các lab/course khác.
 
-## Verification Tong Hop Sau Khi Destroy
+## Verification Tổng Hợp Sau Khi Destroy
 
-Chay cac lenh nay tu root hoac bat ky folder nao.
+Chạy các lệnh này từ root hoặc bất kỳ folder nào.
 
 ### Lambda
 
@@ -573,7 +577,7 @@ Chay cac lenh nay tu root hoac bat ky folder nao.
 aws lambda list-functions --query "Functions[?starts_with(FunctionName, 'alex-')].FunctionName"
 ```
 
-Ky vong: danh sach rong hoac khong con function `alex-*` cua project.
+Kỳ vọng: danh sách rỗng hoặc không còn function `alex-*` của project.
 
 ### SQS
 
@@ -581,7 +585,7 @@ Ky vong: danh sach rong hoac khong con function `alex-*` cua project.
 aws sqs list-queues --queue-name-prefix alex
 ```
 
-Ky vong: khong con queue `alex-analysis-jobs` hoac DLQ.
+Kỳ vọng: không còn queue `alex-analysis-jobs` hoặc DLQ.
 
 ### RDS / Aurora
 
@@ -589,7 +593,7 @@ Ky vong: khong con queue `alex-analysis-jobs` hoac DLQ.
 aws rds describe-db-clusters --query "DBClusters[?contains(DBClusterIdentifier, 'alex')].DBClusterIdentifier"
 ```
 
-Ky vong: rong.
+Kỳ vọng: rỗng.
 
 ### SageMaker
 
@@ -597,7 +601,7 @@ Ky vong: rong.
 aws sagemaker list-endpoints --name-contains alex
 ```
 
-Ky vong: khong con `alex-embedding-endpoint`.
+Kỳ vọng: không còn `alex-embedding-endpoint`.
 
 ### S3 Buckets
 
@@ -605,7 +609,7 @@ Ky vong: khong con `alex-embedding-endpoint`.
 aws s3 ls | rg "alex-"
 ```
 
-Ky vong: khong con bucket `alex-frontend-*`, `alex-lambda-packages-*`, `alex-vectors-*`.
+Kỳ vọng: không còn bucket `alex-frontend-*`, `alex-lambda-packages-*`, `alex-vectors-*`.
 
 ### ECR
 
@@ -613,16 +617,16 @@ Ky vong: khong con bucket `alex-frontend-*`, `alex-lambda-packages-*`, `alex-vec
 aws ecr describe-repositories --query "repositories[?contains(repositoryName, 'alex')].repositoryName"
 ```
 
-Ky vong: khong con `alex-researcher`.
+Kỳ vọng: không còn `alex-researcher`.
 
-### API Gateway REST va HTTP API
+### API Gateway REST và HTTP API
 
 ```bash
 aws apigateway get-rest-apis --query "items[?contains(name, 'alex')].name"
 aws apigatewayv2 get-apis --query "Items[?contains(Name, 'alex')].Name"
 ```
 
-Ky vong: rong.
+Kỳ vọng: rỗng.
 
 ### CloudWatch Dashboards
 
@@ -630,37 +634,37 @@ Ky vong: rong.
 aws cloudwatch list-dashboards --dashboard-name-prefix alex
 ```
 
-Ky vong: rong.
+Kỳ vọng: rỗng.
 
 ### CloudWatch Log Groups
 
-Terraform co the xoa log groups do no quan ly, nhung neu co log group con sot thi co the la do resource duoc tao ngoai Terraform.
+Terraform có thể xóa log groups do nó quản lý, nhưng nếu có log group còn sót thì có thể là do resource được tạo ngoài Terraform.
 
-Kiem tra:
+Kiểm tra:
 
 ```bash
 aws logs describe-log-groups --log-group-name-prefix /aws/lambda/alex
 ```
 
-Neu muon xoa log group con sot, xoa thu cong sau khi chac chan khong can logs nua.
+Nếu muốn xóa log group còn sót, xóa thủ công sau khi chắc chắn không cần logs nữa.
 
 ## Troubleshooting
 
-### Loi: S3 bucket is not empty
+### Lỗi: S3 bucket is not empty
 
-Nguyen nhan:
+Nguyên nhân:
 
-- bucket con object;
-- bucket co versioning, con object versions;
-- bucket co delete markers.
+- bucket còn object;
+- bucket có versioning, còn object versions;
+- bucket có delete markers.
 
-Cach xu ly:
+Cách xử lý:
 
 ```bash
 aws s3 rm "s3://<bucket-name>" --recursive
 ```
 
-Neu bucket co versioning:
+Nếu bucket có versioning:
 
 ```bash
 aws s3api list-object-versions \
@@ -673,62 +677,62 @@ aws s3api delete-objects \
   --delete file:///tmp/versions.json
 ```
 
-Lap lai voi `DeleteMarkers` neu can.
+Lặp lại với `DeleteMarkers` nếu cần.
 
-### Loi: CloudFront distribution deletion takes long
+### Lỗi: CloudFront distribution deletion takes long
 
-CloudFront can disable distribution truoc khi delete. Terraform co the cho vai phut.
+CloudFront cần disable distribution trước khi delete. Terraform có thể chờ vài phút.
 
-Khong kill command neu no van dang polling binh thuong.
+Không kill command nếu nó vẫn đang polling bình thường.
 
-### Loi: Terraform state missing
+### Lỗi: Terraform state missing
 
-Neu `terraform.tfstate` mat nhung resource con tren AWS, Terraform khong biet resource nao de destroy.
+Nếu `terraform.tfstate` mất nhưng resource còn trên AWS, Terraform không biết resource nào để destroy.
 
-Huong xu ly:
+Hướng xử lý:
 
-1. Kiem tra resource con sot bang AWS Console/AWS CLI;
-2. Neu can, import resource vao state roi destroy;
-3. Hoac xoa thu cong tren AWS Console neu resource don gian va ban chac chan.
+1. Kiểm tra resource còn sót bằng AWS Console/AWS CLI;
+2. Nếu cần, import resource vào state rồi destroy;
+3. Hoặc xóa thủ công trên AWS Console nếu resource đơn giản và bạn chắc chắn.
 
-Khong xoa file state truoc khi destroy.
+Không xóa file state trước khi destroy.
 
-### Loi: Resource already deleted
+### Lỗi: Resource already deleted
 
-Neu resource da bi xoa thu cong truoc do, `terraform destroy` co the bao not found.
+Nếu resource đã bị xóa thủ công trước đó, `terraform destroy` có thể báo not found.
 
-Thu:
+Thử:
 
 ```bash
 terraform refresh
 terraform destroy
 ```
 
-Neu van loi, can xu ly state bang `terraform state rm <address>` cho resource da mat. Chi lam khi da chac resource khong con tren AWS.
+Nếu vẫn lỗi, cần xử lý state bằng `terraform state rm <address>` cho resource đã mất. Chỉ làm khi đã chắc resource không còn trên AWS.
 
-### Loi: Terraform provider crash
+### Lỗi: Terraform provider crash
 
-Guide 6 da ghi nhan provider crash co the la transient.
+Guide 6 đã ghi nhận provider crash có thể là transient.
 
-Thu chay lai:
+Thử chạy lại:
 
 ```bash
 terraform destroy
 ```
 
-### Loi: Dependency destroy sai thu tu
+### Lỗi: Dependency destroy sai thứ tự
 
-Neu destroy Part 5 database truoc Part 7/6, API/agents co the con reference ARN da mat.
+Nếu destroy Part 5 database trước Part 7/6, API/agents có thể còn reference ARN đã mất.
 
-Thu tu dung:
+Thứ tự đúng:
 
 ```text
 8 -> 7 -> 6 -> 5 -> 4 -> 3 -> 2
 ```
 
-## Cost Checklist Cuoi Cung
+## Cost Checklist Cuối Cùng
 
-Sau khi destroy xong, vao AWS Billing / Cost Explorer de kiem tra cac service co the con chi phi:
+Sau khi destroy xong, vào AWS Billing / Cost Explorer để kiểm tra các service có thể còn chi phí:
 
 - RDS / Aurora;
 - SageMaker;
@@ -742,11 +746,11 @@ Sau khi destroy xong, vao AWS Billing / Cost Explorer de kiem tra cac service co
 - EventBridge Scheduler;
 - Secrets Manager.
 
-Nen kiem tra lai sau 24 gio vi mot so metric billing co do tre.
+Nên kiểm tra lại sau 24 giờ vì một số metric billing có độ trễ.
 
-## Tom Tat Lenh Destroy Chinh
+## Tóm Tắt Lệnh Destroy Chính
 
-Day la ban rut gon. Chi chay sau khi da doc cac canh bao va buoc empty bucket o tren.
+Đây là bản rút gọn. Chỉ chạy sau khi đã đọc các cảnh báo và bước empty bucket ở trên.
 
 ```bash
 cd terraform/8_enterprise && terraform destroy && cd ../..
@@ -758,4 +762,4 @@ cd terraform/3_ingestion && terraform destroy && cd ../..
 cd terraform/2_sagemaker && terraform destroy && cd ../..
 ```
 
-Neu bat ky buoc nao fail, dung lai, doc phan Troubleshooting, sua dung buoc do, roi moi tiep tuc buoc tiep theo.
+Nếu bất kỳ bước nào fail, dừng lại, đọc phần Troubleshooting, sửa đúng bước đó, rồi mới tiếp tục bước tiếp theo.

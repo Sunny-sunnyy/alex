@@ -19,7 +19,7 @@ load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
 # Model configuration
-MODEL_ID = os.getenv("MODEL_ID_REPORTER", "openai/gpt-5.4-nano")
+MODEL_ID = os.getenv("MODEL_ID_REPORTER", "openai/gpt-5.4-mini")
 
 
 @dataclass

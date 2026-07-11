@@ -2422,3 +2422,468 @@ Sau khi hoàn thành `guides/7_frontend.md`, cần nhớ:
    - throttling/monitoring
    - observability
    - guardrails
+
+---
+
+# Week 4 / Day 4 - Enterprise Grade And Project Completion (`guides/8_enterprise.md`)
+
+## Phạm vi Day 4
+
+Day này là bước cuối của dự án Alex trong course: chuyển hệ thống từ một app đã chạy end-to-end sang một hệ thống có các dấu hiệu enterprise rõ ràng hơn.
+
+Phần này tương ứng với:
+
+- `guides/8_enterprise.md`
+- `terraform/8_enterprise`
+- `README_about_enterprise.md`
+- `Update_for_8_enterprise.md`
+- các thay đổi code-level trong `backend/shared`, `backend/api`, và 5 agent Part 6
+
+Quy ước source of truth cho phần này:
+
+1. code và Terraform hiện tại trong repo;
+2. README hiện tại của từng folder;
+3. `Update_for_8_enterprise.md`;
+4. `README_about_enterprise.md`;
+5. guide gốc `guides/8_enterprise.md`.
+
+Nếu guide gốc khác với code đã triển khai, ưu tiên code đã triển khai.
+
+## Mục tiêu của Part 8
+
+Part 8 không tạo thêm một product feature mới cho người dùng cuối. Nó bổ sung các lớp vận hành và kiểm soát cho hệ thống đã hoàn thành:
+
+- scalability awareness;
+- security review;
+- monitoring bằng CloudWatch dashboards;
+- guardrails ở input/output;
+- explainability cho AI decisions;
+- audit logging;
+- observability qua LangFuse/Logfire khi có cấu hình;
+- kết luận dự án Alex đã hoàn thành end-to-end.
+
+## Source of truth thực tế của enterprise layer
+
+Guide 8 mô tả nhiều hướng enterprise như WAF, GuardDuty, VPC endpoints, alarms, dashboard, guardrails, explainability và LangFuse.
+
+Repo hiện tại không triển khai toàn bộ mọi gợi ý infrastructure trong guide. Thay vào đó, implementation thực tế chia thành hai nhóm:
+
+### 1. Đã triển khai bằng Terraform
+
+`terraform/8_enterprise` hiện tạo:
+
+- dashboard `alex-ai-model-usage`;
+- dashboard `alex-agent-performance`;
+- output `dashboard_urls`;
+- output `dashboard_names`;
+- output `setup_instructions`.
+
+Dashboard agent performance là phần khớp nhất với runtime hiện tại vì nó đo 5 Lambda:
+
+- `alex-planner`
+- `alex-tagger`
+- `alex-reporter`
+- `alex-charter`
+- `alex-retirement`
+
+Các metric chính:
+
+- Lambda duration;
+- errors;
+- invocations;
+- concurrent executions;
+- throttles.
+
+Dashboard AI model usage vẫn còn Bedrock-oriented theo guide gốc. Đây là điểm cần nhớ: Part 6 agents hiện đã migrate sang OpenAI qua LiteLLM, nên Bedrock metrics không đại diện cho inference chính của agent orchestra.
+
+SageMaker metrics trong dashboard vẫn còn giá trị vì embedding endpoint `alex-embedding-endpoint` vẫn được dùng cho ingest/search/reporter market insight flow.
+
+### 2. Đã triển khai bằng code-level enterprise features
+
+Theo `Update_for_8_enterprise.md` và code hiện tại, repo đã có shared enterprise package:
+
+```text
+backend/shared/
+├── pyproject.toml
+├── uv.lock
+└── alex_shared/
+    ├── __init__.py
+    ├── audit.py
+    └── guardrails.py
+```
+
+Các function quan trọng:
+
+| Function / class | Vai trò |
+|---|---|
+| `validate_chart_data()` | validate output JSON của Charter trước khi lưu chart payload |
+| `sanitize_user_input()` | phát hiện prompt-injection pattern đơn giản ở text input |
+| `truncate_response()` | giới hạn kích thước response để tránh runaway output |
+| `AuditLogger.log_ai_decision()` | ghi audit event `AI_DECISION` ra CloudWatch và optional LangFuse |
+
+Các agent/API đã dùng shared package này:
+
+- `backend/api/main.py`
+- `backend/planner/lambda_handler.py`
+- `backend/tagger/lambda_handler.py`
+- `backend/reporter/lambda_handler.py`
+- `backend/charter/lambda_handler.py`
+- `backend/retirement/lambda_handler.py`
+
+## Enterprise features đã hoàn thành
+
+### Monitoring
+
+Đã có hai lớp monitoring:
+
+1. CloudWatch dashboards từ `terraform/8_enterprise`;
+2. structured logs trong Lambda handlers.
+
+Structured event examples theo implementation:
+
+- `PLANNER_STARTED`
+- `AGENT_INVOKED`
+- `PLANNER_COMPLETED`
+- `REPORTER_STARTED`
+- `REPORTER_COMPLETED`
+- `CHARTER_STARTED`
+- `CHARTER_COMPLETED`
+- `RETIREMENT_STARTED`
+- `RETIREMENT_COMPLETED`
+- `AI_DECISION`
+
+Ngoài ra, Part 6 agents đều có timing logs để đọc latency theo phase:
+
+- create phase;
+- agent run phase;
+- DB phase;
+- Lambda total.
+
+### Guardrails
+
+Guardrails đã có ở nhiều tầng:
+
+- FastAPI/Pydantic request validation trong `backend/api`;
+- database schema validation trong `backend/database/src/schemas.py`;
+- prompt-injection sanitization cho một số free-text fields trong API;
+- Charter output validation trước khi lưu chart payload;
+- response truncation trong Reporter và Retirement;
+- judge/evaluator riêng cho Reporter;
+- verified-web-only gate trong Researcher để tránh ingest nội dung không có nguồn web xác minh.
+
+Điểm quan trọng: guardrails ở đây là code-level validation, không phải một dịch vụ guardrail bên ngoài.
+
+### Explainability
+
+Explainability đã được tăng ở các điểm:
+
+- Tagger có rationale trong structured classification;
+- Reporter prompt yêu cầu recommendation có `Recommendation`, `Reasoning`, `Impact`, `Priority`;
+- Retirement tính toán định lượng bằng Python trước, rồi LLM chỉ diễn giải;
+- job payloads được tách theo từng agent trong Aurora để dễ truy vết output.
+
+Không nên mô tả hệ thống này là có compliance-grade immutable audit store. Repo hiện tại có audit logs, chưa có audit database chuyên biệt.
+
+### Observability
+
+Observability có hai hướng:
+
+1. CloudWatch logs/metrics;
+2. LangFuse/Logfire optional nếu cấu hình env tương ứng.
+
+Các agent Part 6 có `observability.py` context manager. Khi có LangFuse credentials, traces có thể được flush ở cuối Lambda execution.
+
+Điểm cần nhớ: LangFuse là optional. Hệ thống vẫn chạy nếu không có LangFuse credentials.
+
+### Security
+
+Các lớp security thực tế đã có:
+
+- Clerk JWT validation trong `backend/api`;
+- API Gateway throttle ở Part 7;
+- FastAPI CORS allowlist qua `CORS_ORIGINS`;
+- API key cho ingest API Part 3;
+- IAM role/policy cho Lambda, SQS, Aurora Data API, Secrets Manager, SageMaker và S3 Vectors;
+- Secrets Manager cho Aurora credentials;
+- không hard-code secrets trong source.
+
+Các phần guide đề xuất nhưng chưa triển khai đầy đủ trong Terraform:
+
+- AWS WAF;
+- GuardDuty;
+- VPC endpoints;
+- API Gateway JWT authorizer;
+- CloudWatch alarms/SNS;
+- private S3 bucket với CloudFront OAC/OAI.
+
+Đây là roadmap enterprise hardening, không phải điều kiện để kết luận course project hoàn thành.
+
+## Điểm khác biệt quan trọng so với `guides/8_enterprise.md`
+
+### Bedrock vs OpenAI
+
+Guide 8 vẫn có nhiều đoạn giả định Bedrock/Nova.
+
+Implementation hiện tại của Part 6 đã migrate sang OpenAI qua LiteLLM:
+
+| Agent | Env var | Runtime model pattern |
+|---|---|---|
+| Planner | `MODEL_ID_PLANNER` | OpenAI via LiteLLM |
+| Tagger | `MODEL_ID_TAGGER` | OpenAI via LiteLLM |
+| Reporter | `MODEL_ID_REPORTER` | OpenAI via LiteLLM |
+| Charter | `MODEL_ID_CHARTER` | OpenAI via LiteLLM |
+| Retirement | `MODEL_ID_RETIREMENT` | OpenAI via LiteLLM |
+| Judge | `MODEL_ID_JUDGE` | OpenAI via LiteLLM |
+
+Vì vậy:
+
+- không dùng Bedrock IAM cho Part 6 agents;
+- không dùng `BEDROCK_MODEL_ID` / `BEDROCK_REGION` trong `terraform/6_agents`;
+- dashboard Bedrock chỉ còn là legacy/guide artifact, không phải bằng chứng runtime chính của agents.
+
+### Researcher không còn là App Runner
+
+Guide cũ vẫn còn dấu vết App Runner.
+
+Implementation hiện tại:
+
+- Researcher chạy bằng AWS Lambda container image;
+- expose qua Lambda Function URL;
+- Docker image nằm trong ECR `alex-researcher`;
+- scheduler tùy chọn chạy mỗi 12 giờ;
+- model mặc định là OpenAI qua LiteLLM;
+- có verified-web-only contract và immediate-snapshot strategy.
+
+### Part 8 Terraform không triển khai toàn bộ enterprise checklist
+
+`terraform/8_enterprise` hiện chỉ tạo dashboards.
+
+Các guardrails, audit logging, explainability và observability nằm trong application code của backend agents/API, không nằm trong folder Terraform Part 8.
+
+Đây là điều đúng theo repo hiện tại và cần ghi nhớ khi đọc guide.
+
+## Các file quan trọng của Part 8
+
+### Tài liệu
+
+- `guides/8_enterprise.md`
+- `README_about_enterprise.md`
+- `Update_for_8_enterprise.md`
+- `terraform/8_enterprise/README.md`
+- `terraform/6_agents/README.md`
+- README của từng agent trong `backend/*/README.md`
+
+### Code shared enterprise
+
+- `backend/shared/alex_shared/guardrails.py`
+- `backend/shared/alex_shared/audit.py`
+
+### Code sử dụng enterprise layer
+
+- `backend/api/main.py`
+- `backend/planner/lambda_handler.py`
+- `backend/tagger/agent.py`
+- `backend/tagger/lambda_handler.py`
+- `backend/reporter/templates.py`
+- `backend/reporter/lambda_handler.py`
+- `backend/reporter/judge.py`
+- `backend/charter/lambda_handler.py`
+- `backend/retirement/lambda_handler.py`
+
+### Terraform
+
+- `terraform/8_enterprise/main.tf`
+- `terraform/8_enterprise/variables.tf`
+- `terraform/8_enterprise/outputs.tf`
+- `terraform/8_enterprise/terraform.tfvars.example`
+
+## Lệnh cốt lõi của Part 8
+
+### Deploy dashboards
+
+```bash
+cd terraform/8_enterprise
+terraform init
+terraform plan
+terraform apply
+terraform output dashboard_urls
+```
+
+### Xem dashboards
+
+```bash
+cd terraform/8_enterprise
+terraform output dashboard_names
+terraform output dashboard_urls
+```
+
+### Package và deploy agent code sau thay đổi enterprise layer
+
+```bash
+cd backend
+uv run package_docker.py
+uv run deploy_all_lambdas.py
+```
+
+### Chạy full backend integration test
+
+```bash
+cd backend
+uv run test_full.py
+```
+
+### Theo dõi agent logs
+
+```bash
+cd backend
+uv run watch_agents.py --region ap-southeast-1 --lookback 10 --interval 2
+```
+
+### Lọc structured event logs
+
+```bash
+aws logs tail /aws/lambda/alex-planner --since 10m --region ap-southeast-1 | rg '"event"'
+aws logs tail /aws/lambda/alex-reporter --since 10m --region ap-southeast-1 | rg '"event"'
+aws logs tail /aws/lambda/alex-charter --since 10m --region ap-southeast-1 | rg '"event"'
+aws logs tail /aws/lambda/alex-retirement --since 10m --region ap-southeast-1 | rg '"event"'
+```
+
+Không dump toàn bộ Lambda environment variables vì có thể chứa secrets.
+
+## Lỗi và bẫy quan trọng của Part 8
+
+### Bẫy 1: tưởng Part 8 chỉ nằm trong `terraform/8_enterprise`
+
+Không đúng.
+
+Part 8 trong repo hiện tại nằm rải ở:
+
+- Terraform dashboards;
+- shared package `backend/shared`;
+- agent lambda handlers;
+- API sanitization;
+- Reporter judge;
+- Researcher verified-web gate;
+- observability modules.
+
+### Bẫy 2: dùng Bedrock dashboard làm bằng chứng cho OpenAI agent runtime
+
+Không đúng.
+
+Part 6 agents hiện gọi OpenAI qua LiteLLM. Bedrock dashboard không thể hiện latency/token/cost chính của các model này.
+
+Nếu cần observability model-level cho OpenAI runtime, dùng:
+
+- structured logs;
+- LangFuse traces nếu đã cấu hình;
+- OpenAI platform traces nếu phù hợp;
+- thêm dashboard riêng về application-level timings.
+
+### Bẫy 3: xem WAF/GuardDuty/VPC endpoints là đã triển khai
+
+Không đúng.
+
+Guide 8 nêu chúng như enterprise recommendations. Repo hiện tại chưa tạo các resource đó trong Terraform.
+
+### Bẫy 4: quên rằng frontend bucket hiện public
+
+Part 7 hiện dùng S3 website endpoint public làm CloudFront origin. Đây là đủ cho course project nhưng chưa phải hardened production setup.
+
+Production hardening tiếp theo nên cân nhắc private S3 bucket + CloudFront OAC/OAI.
+
+### Bẫy 5: audit log không phải audit store bất biến
+
+`AuditLogger` hiện ghi structured log và optional LangFuse event.
+
+Nó chưa phải:
+
+- immutable audit ledger;
+- compliance database;
+- retention policy đầy đủ;
+- signed audit trail.
+
+## Trạng thái kết thúc Part 8
+
+Sau Part 8, Alex đã có:
+
+1. frontend production path bằng Next.js static export, S3 và CloudFront;
+2. API backend bằng FastAPI Lambda;
+3. Clerk authentication;
+4. Aurora PostgreSQL Serverless v2 với Data API;
+5. SQS async orchestration;
+6. 5 Lambda agents cho portfolio analysis;
+7. Researcher agent độc lập dùng browser + verified ingest;
+8. SageMaker embedding endpoint;
+9. S3 Vectors knowledge base;
+10. CloudWatch dashboards cho AI/SageMaker và Lambda agents;
+11. structured logging;
+12. code-level guardrails;
+13. explainability improvements;
+14. audit logging;
+15. optional LangFuse observability.
+
+Đây là trạng thái đủ để kết luận dự án Alex của course đã hoàn thành end-to-end.
+
+## Kết luận hoàn thành dự án
+
+Alex hiện đã đi hết toàn bộ hành trình của course:
+
+- từ IAM permissions;
+- đến SageMaker embeddings;
+- đến S3 Vectors ingest/search;
+- đến Researcher agent;
+- đến Aurora database;
+- đến multi-agent Lambda orchestra;
+- đến frontend/API production deployment;
+- đến enterprise monitoring, guardrails, audit và observability.
+
+Kiến trúc cuối cùng là một SaaS financial planning platform có đầy đủ các lớp chính:
+
+```text
+Frontend / Clerk
+  -> API Gateway / FastAPI Lambda
+  -> Aurora Data API + SQS
+  -> Planner Lambda
+  -> Tagger / Reporter / Charter / Retirement Lambdas
+  -> Aurora job payloads
+
+Researcher Lambda Function URL
+  -> Playwright MCP + OpenAI model
+  -> Ingest API
+  -> SageMaker embeddings
+  -> S3 Vectors
+```
+
+Dự án được xem là hoàn thành ở cấp course capstone.
+
+Những việc còn lại sau completion không còn là yêu cầu hoàn thành course, mà là roadmap production hardening:
+
+- thay Bedrock dashboard bằng OpenAI/LangFuse cost-latency dashboard;
+- thêm CloudWatch alarms và SNS;
+- harden CloudFront/S3 bằng OAC/OAI;
+- cân nhắc WAF;
+- bổ sung DLQ alarms;
+- thiết kế immutable audit store nếu cần compliance;
+- load test để quyết định concurrency/ACU/throttle thật;
+- review cost định kỳ, đặc biệt Aurora.
+
+## Handoff sau khi hoàn thành toàn bộ dự án
+
+Khi mở session mới để tiếp tục cải tiến Alex, nên đọc theo thứ tự:
+
+1. `README.md`
+2. `README_about_enterprise.md`
+3. `Update_for_8_enterprise.md`
+4. `terraform/8_enterprise/README.md`
+5. `terraform/6_agents/README.md`
+6. `backend/planner/README.md`
+7. README của agent/API/frontend liên quan tới task mới
+
+Khi sửa code từ đây trở đi:
+
+- dùng CodeGraph để xem impact trước;
+- không dựa vào guide cũ nếu code hiện tại đã khác;
+- không in secrets từ `.env`, `terraform.tfvars`, credentials hoặc Lambda env;
+- ưu tiên test nhỏ nhất trước, rồi mới chạy integration test;
+- nếu thay đổi agents, kiểm tra packaging Docker có mount `backend/shared`;
+- nếu thay đổi dashboard, nhớ rằng Part 6 hiện dùng OpenAI, không phải Bedrock.

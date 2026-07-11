@@ -68,7 +68,14 @@ def test_reporter_lambda():
 
         if job and job.get('report_payload'):
             print("\nReport generated successfully!")
-            print(f"Report preview: {job['report_payload'][:500]}...")
+            payload = job['report_payload']
+            content = payload.get('content', '')
+            print(f"Report length: {len(content)} characters")
+            if content:
+                preview = content[:500]
+                if len(content) > 500:
+                    preview += "..."
+                print(f"Report preview: {preview}")
         else:
             print("\nNo report found in database")
 

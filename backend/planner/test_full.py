@@ -167,11 +167,11 @@ def main():
     if job.get('report_payload'):
         print("\nPortfolio Report:")
         report = job['report_payload']
-        analysis = report.get('analysis', '')
-        print(f"  Length: {len(analysis)} characters")
-        if analysis:
-            preview = analysis[:300]
-            if len(analysis) > 300:
+        content = report.get('content', '')
+        print(f"  Length: {len(content)} characters")
+        if content:
+            preview = content[:300]
+            if len(content) > 300:
                 preview += "..."
             print(f"  Preview: {preview}")
     
@@ -187,9 +187,13 @@ def main():
     if job.get('retirement_payload'):
         print("\nRetirement Analysis:")
         ret = job['retirement_payload']
-        print(f"  Success Rate: {ret.get('success_rate', 'N/A')}%")
-        print(f"  Projected Value: ${ret.get('projected_value', 0):,.0f}")
-        print(f"  Years to Retirement: {ret.get('years_to_retirement', 'N/A')}")
+        analysis = ret.get('analysis', '')
+        print(f"  Length: {len(analysis)} characters")
+        if analysis:
+            preview = analysis[:300]
+            if len(analysis) > 300:
+                preview += "..."
+            print(f"  Preview: {preview}")
     
     print("\n" + "=" * 70)
     print("Full test completed successfully!")

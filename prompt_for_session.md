@@ -16,7 +16,7 @@ Bắt buộc đọc:
 
 Trạng thái researcher hiện tại:
 
-* Tôi đang ở `guides/7_frontend.md` và đã hoàn thành xong các guide trước đó 
+* Tôi đang ở `guides/8_enterprise.md` và đã hoàn thành xong các guide trước đó
 
 Bạn cũng phải xem qua: `backend/*/README.md`, `frontend/README.md`, và `terraform/*/README.md` chứa mô tả của mỗi folder mà tôi đã thực hiện qua để nắm rõ hơn về ngữ cảnh.
 
